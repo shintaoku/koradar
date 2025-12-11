@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>Koradar</title>
+        <link rel="stylesheet" href="/style-51e35e116b96ce9.css" integrity="sha384-11+cjeSDe7pXa8FFzNxoNA2jC5uyCv55DJmaU60Hc8tIZvmjwTKZIArU9HiyZMUQ"/>
+    <link rel="modulepreload" href="/koradar-frontend-15db4ceb5f003763.js" crossorigin="anonymous" integrity="sha384-XHgmqmJBiVJzN4VHB/KrOn3F3xunwjAsVzgb9d1qtIxwwmwLQS8SWXSSPr8mto37"><link rel="preload" href="/koradar-frontend-15db4ceb5f003763_bg.wasm" crossorigin="anonymous" integrity="sha384-dyRlSPA4jShR8cJ/n8F0YJr9t+bNl9ZUWuIWrdH06SPsg1EbZW0rw6YGtaqOWPV+" as="fetch" type="application/wasm"></head>
+    <body>
+    
+<script type="module">
+import init, * as bindings from '/koradar-frontend-15db4ceb5f003763.js';
+const wasm = await init({ module_or_path: '/koradar-frontend-15db4ceb5f003763_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script></body>
+</html>
+

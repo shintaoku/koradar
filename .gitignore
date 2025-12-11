@@ -1,0 +1,45 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+# Note: Cargo.lock is committed for applications (not ignored)
+
+# QEMU build artifacts
+qemu-build/
+qemu-build-docker/
+qemu-src/
+
+# Frontend build artifacts
+frontend/dist/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Debug and log files
+*.log
+.cursor/
+debug.log
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# Test binaries
+/tmp/koradar_test_hello
+
+# Docker files (if any)
+Dockerfile.qemu
+docker-compose.yml
+
+# Environment files
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+

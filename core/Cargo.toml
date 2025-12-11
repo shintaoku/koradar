@@ -1,0 +1,13 @@
+[package]
+name = "koradar-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+parking_lot = "0.12"
+dashmap = "5.5"
+bitflags = { version = "2.4", features = ["serde"] }
+goblin = "0.10.4"
+anyhow = "1.0.100"
+
