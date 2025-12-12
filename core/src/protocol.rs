@@ -9,6 +9,8 @@ pub enum TraceEvent {
         vcpu_index: u32,
         pc: u64,
         bytes: Vec<u8>,
+        #[serde(default)]
+        disasm: Option<String>,
     }, // Simplified for now
     MemAccess {
         vcpu_index: u32,
@@ -21,13 +23,34 @@ pub enum TraceEvent {
     },
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TraceEntry {
+    pub clnum: u32,
+    pub address: u64,
+    pub disassembly: String,
+    pub reg_diff: Option<(usize, u64)>,       // (index, value)
+    pub mem_access: Option<(u64, u64, bool)>, // (addr, value, is_write)
+}
+
 // Client -> Server messages
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
-    QueryState { clnum: u32 },
-    StepForward { current: u32 },
-    StepBackward { current: u32 },
+    QueryState {
+        clnum: u32,
+    },
+    GetTraceLog {
+        start: u32,
+        count: u32,
+        #[serde(default)]
+        only_user_code: bool,
+    },
+    StepForward {
+        current: u32,
+    },
+    StepBackward {
+        current: u32,
+    },
 }
 
 // Server -> Client messages (beyond raw TraceEvent)
@@ -42,6 +65,9 @@ pub enum ServerMessage {
         disassembly: String,
     },
     TraceEvent(TraceEvent),
+    TraceLog {
+        entries: Vec<TraceEntry>,
+    },
     MaxClnum {
         max: u32,
     },

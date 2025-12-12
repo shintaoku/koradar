@@ -968,6 +968,7 @@ dependencies = [
 name = "koradar-tracer"
 version = "0.1.0"
 dependencies = [
+ "lazy_static",
  "qemu-plugin-sys",
  "serde",
  "serde_json",

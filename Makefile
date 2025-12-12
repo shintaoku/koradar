@@ -72,7 +72,7 @@ trace: build-tracer
 		echo "System emulation mode requires a kernel/disk image to boot."; \
 		echo ""; \
 		echo "To actually trace a Linux binary:"; \
-		if [[ "$OSTYPE" == "darwin"* ]]; then \
+		if [ "$(UNAME_S)" = "Darwin" ]; then \
 			echo "  ./scripts/trace_docker.sh /path/to/binary"; \
 			echo "  (macOS requires Docker for linux-user mode)"; \
 		else \
@@ -89,23 +89,14 @@ trace: build-tracer
 			-no-reboot; \
 	else \
 		echo "Tracing binary: $(BINARY)"; \
-		if [[ "$OSTYPE" == "darwin"* ]]; then \
+		if [ "$(UNAME_S)" = "Darwin" ]; then \
 			if [ "$(DOCKER)" != "1" ]; then \
 				echo "Error: On macOS, linux-user mode requires Docker."; \
 				echo "  Run: make trace BINARY=$(BINARY) DOCKER=1"; \
-				echo "  Or use: ./scripts/setup_qemu_docker.sh first"; \
+				echo "  Or use: ./scripts/trace_docker.sh $(BINARY)"; \
 				exit 1; \
 			fi; \
-			echo "Running QEMU in Docker container..."; \
-			docker run --rm -it \
-				-v "$(pwd)/target/release:/plugins:ro" \
-				-v "$(pwd)/qemu-build-docker/bin:/qemu-bin:ro" \
-				-v "$(BINARY):/binary:ro" \
-				-v /tmp:/tmp \
-				ubuntu:22.04 \
-				/qemu-bin/qemu-x86_64 \
-				-plugin /plugins/libkoradar_tracer.so \
-				/binary; \
+			./scripts/trace_docker.sh $(BINARY); \
 		else \
 			if [ ! -f "./qemu-build/bin/qemu-x86_64" ]; then \
 				echo "Error: qemu-x86_64 not found. Please rebuild QEMU with user-mode support:"; \

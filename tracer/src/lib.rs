@@ -1,5 +1,7 @@
+use lazy_static::lazy_static;
 use qemu_plugin_sys::*;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
 use std::os::raw::{c_char, c_int, c_void};
@@ -20,6 +22,7 @@ enum TraceEvent {
         vcpu_index: u32,
         pc: u64,
         bytes: Vec<u8>,
+        disasm: Option<String>,
     },
     Exit {
         vcpu_index: u32,
@@ -31,10 +34,17 @@ struct TracerState {
     stream: Option<TcpStream>,
 }
 
-static STATE: Mutex<TracerState> = Mutex::new(TracerState {
-    insn_count: 0,
-    stream: None,
-});
+lazy_static! {
+    static ref STATE: Mutex<TracerState> = Mutex::new(TracerState {
+        insn_count: 0,
+        stream: None,
+    });
+
+    // Cache for instruction bytes: PC -> Bytes
+    static ref INSN_CACHE: Mutex<HashMap<u64, Vec<u8>>> = Mutex::new(HashMap::new());
+    // Cache for disassembly: PC -> String
+    static ref DISASM_CACHE: Mutex<HashMap<u64, String>> = Mutex::new(HashMap::new());
+}
 
 // --- Helper to send events ---
 fn send_event(event: TraceEvent) {
@@ -93,11 +103,25 @@ extern "C" fn vcpu_insn_exec(vcpu_index: u32, userdata: *mut c_void) {
     // Drop lock before sending to avoid contention if send blocks (though unix stream buffer helps)
     drop(state);
 
+    // Retrieve bytes from cache
+    let (bytes, disasm) = if let Ok(cache) = INSN_CACHE.lock() {
+        let b = cache.get(&pc).cloned().unwrap_or_default();
+        let d = if let Ok(d_cache) = DISASM_CACHE.lock() {
+            d_cache.get(&pc).cloned()
+        } else {
+            None
+        };
+        (b, d)
+    } else {
+        (Vec::new(), None)
+    };
+
     send_event(TraceEvent::InsnExec {
         vcpu_index,
         pc,
-        bytes: Vec::new(),
-    }); // bytes not yet available
+        bytes,
+        disasm,
+    });
 }
 
 extern "C" fn vcpu_tb_trans(_id: qemu_plugin_id_t, tb: *mut qemu_plugin_tb) {
@@ -106,6 +130,52 @@ extern "C" fn vcpu_tb_trans(_id: qemu_plugin_id_t, tb: *mut qemu_plugin_tb) {
         for i in 0..n {
             let insn = qemu_plugin_tb_get_insn(tb, i);
             let vaddr = qemu_plugin_insn_vaddr(insn);
+
+            // Extract bytes
+            let size = qemu_plugin_insn_size(insn);
+            // Initialize with a pattern to detect if write failed
+            let mut bytes = vec![0xAAu8; size];
+            
+            // Try haddr first (more reliable for reading bytes)
+            let haddr = qemu_plugin_insn_haddr(insn);
+            let mut captured = false;
+
+            if !haddr.is_null() {
+                std::ptr::copy_nonoverlapping(haddr as *const u8, bytes.as_mut_ptr(), size);
+                captured = true;
+            } else {
+                // Fallback
+                // We assume qemu_plugin_insn_data writes to the buffer.
+                // If it doesn't, bytes will remain 0xAA.
+                // Note: qemu_plugin_insn_data return value is actually usize (bytes copied) in some versions,
+                // but header signature might vary. We'll rely on pattern check.
+                qemu_plugin_insn_data(insn, bytes.as_mut_ptr() as *mut c_void, size);
+                // Check if unchanged
+                if bytes.iter().all(|&b| b == 0xAA) {
+                    captured = false;
+                } else {
+                    captured = true;
+                }
+            }
+
+            if !captured {
+                // If capture failed, send empty bytes so server falls back to QEMU disasm
+                bytes.clear();
+            }
+            
+            // Store in cache
+            if let Ok(mut cache) = INSN_CACHE.lock() {
+                cache.insert(vaddr, bytes);
+            }
+            
+            // Get disassembly
+            let disas_ptr = qemu_plugin_insn_disas(insn);
+            if !disas_ptr.is_null() {
+                let s = std::ffi::CStr::from_ptr(disas_ptr).to_string_lossy().into_owned();
+                 if let Ok(mut cache) = DISASM_CACHE.lock() {
+                    cache.insert(vaddr, s);
+                 }
+            }
 
             // Pass PC as userdata
             qemu_plugin_register_vcpu_insn_exec_cb(

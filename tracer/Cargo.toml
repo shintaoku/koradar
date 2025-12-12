@@ -7,6 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+lazy_static = "1.5.0"
 qemu-plugin-sys = "10.1.0-v2" # Using a recent version compatible with modern QEMU
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

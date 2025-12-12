@@ -1,4 +1,5 @@
 use crate::disasm::Disassembler;
+use crate::protocol::TraceEntry;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,14 @@ pub struct TraceDB {
     insn_cache: DashMap<(Address, Vec<u8>), String>,
     // Map from Clnum to instruction bytes
     instructions: DashMap<Clnum, Vec<u8>>,
+    // Map from Clnum to disassembly string (fallback if bytes unavailable or disasm failed)
+    instructions_disasm: DashMap<Clnum, String>,
+    // User code ranges (start, end) inclusive
+    user_code_ranges: RwLock<Vec<(u64, u64)>>,
+    // Entry point of the binary (static address)
+    entry_point: RwLock<Option<u64>>,
+    // Execution bias (RunAddr - StaticAddr)
+    bias: RwLock<i64>,
 }
 
 impl TraceDB {
@@ -77,7 +86,29 @@ impl TraceDB {
             disassembler: Mutex::new(Disassembler::new().expect("Failed to init disassembler")),
             insn_cache: DashMap::new(),
             instructions: DashMap::new(),
+            instructions_disasm: DashMap::new(),
+            user_code_ranges: RwLock::new(Vec::new()),
+            entry_point: RwLock::new(None),
+            bias: RwLock::new(0),
         }
+    }
+
+    pub fn set_entry_point(&self, ep: u64) {
+        *self.entry_point.write() = Some(ep);
+        println!("[DEBUG] TraceDB: Entry Point set to {:x}", ep);
+    }
+
+    pub fn set_bias(&self, bias: i64) {
+        *self.bias.write() = bias;
+        println!("[DEBUG] TraceDB: Bias set to {:x} (RunAddr - StaticAddr)", bias);
+    }
+
+    pub fn get_bias(&self) -> i64 {
+        *self.bias.read()
+    }
+
+    pub fn get_entry_point(&self) -> Option<u64> {
+        *self.entry_point.read()
     }
 
     pub fn load_static_memory(&self, start_addr: Address, data: &[u8]) {
@@ -87,9 +118,43 @@ impl TraceDB {
         }
     }
 
+    pub fn register_code_range(&self, start: u64, size: u64) {
+        println!(
+            "[DEBUG] register_code_range: {:x} - {:x}",
+            start,
+            start + size
+        );
+        let mut ranges = self.user_code_ranges.write();
+        ranges.push((start, start + size));
+    }
+
+    pub fn is_user_code(&self, address: u64) -> bool {
+        let ranges = self.user_code_ranges.read();
+        // If no ranges registered, treat everything as user code
+        if ranges.is_empty() {
+            return true;
+        }
+        
+        // Normalize address by removing bias
+        // StaticAddr = RunAddr - Bias
+        let bias = *self.bias.read();
+        // Handle negative result safely (though address should be > bias if bias is positive)
+        let static_addr = (address as i128 - bias as i128) as u64;
+
+        ranges
+            .iter()
+            .any(|&(start, end)| static_addr >= start && static_addr < end)
+    }
+
     pub fn add_instruction(&self, clnum: Clnum, bytes: Vec<u8>) {
         if !bytes.is_empty() {
             self.instructions.insert(clnum, bytes);
+        }
+    }
+
+    pub fn add_instruction_disasm(&self, clnum: Clnum, disasm: String) {
+        if !disasm.is_empty() {
+            self.instructions_disasm.insert(clnum, disasm);
         }
     }
 
@@ -202,11 +267,17 @@ impl TraceDB {
 
         if let Some(change) = pc_change {
             // Get bytes for this clnum
-            // We use the clnum of the instruction execution, which matches the change.clnum
+            let mut _bytes_ok = false;
             if let Some(bytes) = self.instructions.get(&change.clnum) {
-                if !bytes.is_empty() {
+                if !bytes.is_empty() && !bytes.iter().all(|&b| b == 0) {
                     return self.disassemble(change.address, &bytes);
                 }
+                // If bytes are empty or all zeros, fall through
+            }
+            
+            // Check for pre-calculated disassembly (from QEMU/Tracer)
+            if let Some(disasm) = self.instructions_disasm.get(&change.clnum) {
+                 return disasm.clone();
             }
 
             // Fallback: Read from memory (static code)
@@ -217,5 +288,122 @@ impl TraceDB {
         }
 
         String::from("???")
+    }
+
+    pub fn get_trace_log(&self, start: Clnum, count: u32, only_user_code: bool) -> Vec<TraceEntry> {
+        // println!(
+        //     "[DEBUG] get_trace_log start={} count={} only_user_code={}",
+        //     start, count, only_user_code
+        // );
+        
+        // Debug: Dump user code ranges if only_user_code is true
+        // if only_user_code {
+        //     let ranges = self.user_code_ranges.read();
+        //     println!("[DEBUG] Current user_code_ranges: {:?}", *ranges);
+        // }
+
+        let changes = self.changes.read();
+        let mut entries = Vec::new();
+
+        let mut c = start;
+        let mut collected = 0;
+        let max_clnum = changes.last().map(|c| c.clnum).unwrap_or(0);
+        // println!("[DEBUG] max_clnum={}", max_clnum);
+
+        // Safety break
+        while collected < count && c <= max_clnum {
+            // Find the IS_START change for this clnum
+            let start_change = changes.iter().find(|ch| {
+                ch.clnum == c
+                    && ChangeFlags::from_bits_truncate(ch.flags).contains(ChangeFlags::IS_START)
+            });
+
+            if let Some(change) = start_change {
+                if !only_user_code || self.is_user_code(change.address) {
+                    let disassembly = {
+                        let mut d = String::new();
+                        let mut done = false;
+                        
+                        // 1. Try bytes if valid (non-zero)
+                        if let Some(bytes) = self.instructions.get(&c) {
+                            if !bytes.is_empty() && !bytes.iter().all(|&b| b == 0) {
+                                d = self.disassemble(change.address, &bytes);
+                                done = true;
+                            }
+                        }
+                        
+                        // 2. Try QEMU disasm
+                        if !done {
+                            if let Some(qs) = self.instructions_disasm.get(&c) {
+                                d = qs.clone();
+                                done = true;
+                            }
+                        }
+                        
+                        // 3. Fallback to memory (using static address)
+                        if !done {
+                            let bias = *self.bias.read();
+                            let static_addr = (change.address as i128 - bias as i128) as u64;
+                            let bytes = self.get_memory_at(c, static_addr, 16);
+                            d = self.disassemble(change.address, &bytes);
+                        }
+                        d
+                    };
+
+                    // Find register/memory effects
+                    // Just take the first one for now
+                    let reg_diff = changes
+                        .iter()
+                        .find(|ch| {
+                            ch.clnum == c
+                                && !ChangeFlags::from_bits_truncate(ch.flags)
+                                    .contains(ChangeFlags::IS_MEM)
+                                && !ChangeFlags::from_bits_truncate(ch.flags)
+                                    .contains(ChangeFlags::IS_START)
+                                && ChangeFlags::from_bits_truncate(ch.flags)
+                                    .contains(ChangeFlags::IS_WRITE)
+                        })
+                        .map(|ch| ((ch.address / 8) as usize, ch.data));
+
+                    let mem_access = changes
+                        .iter()
+                        .find(|ch| {
+                            ch.clnum == c
+                                && ChangeFlags::from_bits_truncate(ch.flags)
+                                    .contains(ChangeFlags::IS_MEM)
+                        })
+                        .map(|ch| {
+                            (
+                                ch.address,
+                                ch.data,
+                                ChangeFlags::from_bits_truncate(ch.flags)
+                                    .contains(ChangeFlags::IS_WRITE),
+                            )
+                        });
+
+                    entries.push(TraceEntry {
+                        clnum: c,
+                        address: change.address,
+                        disassembly,
+                        reg_diff,
+                        mem_access,
+                    });
+                    collected += 1;
+                }
+            } else {
+                // Too noisy to log every missing clnum, but useful for debugging holes
+                // if c % 1000 == 0 {
+                //     println!("[DEBUG] No IS_START change found for clnum {}", c);
+                // }
+            }
+            c += 1;
+
+            if c > start + 100000 && collected == 0 {
+                // println!("[DEBUG] Break due to scan limit. collected={}", collected);
+                break; // Prevent infinite loop if no user code found
+            }
+        }
+        // println!("[DEBUG] returning {} entries", entries.len());
+        entries
     }
 }

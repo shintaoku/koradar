@@ -92,14 +92,32 @@ async fn main() {
 
                             // Apply to DB
                             match &event {
-                                TraceEvent::InsnExec {
-                                    vcpu_index: _,
-                                    pc,
-                                    bytes,
-                                } => {
-                                    ipc_db.add_instruction(current_clnum, bytes.clone());
+                                    TraceEvent::InsnExec {
+                                        vcpu_index: _,
+                                        pc,
+                                        bytes,
+                                        disasm,
+                                    } => {
+                                        if current_clnum < 10 {
+                                            // println!("[DEBUG] Server received InsnExec: pc={:x}, bytes={:?}, disasm={:?}", pc, bytes, disasm);
+                                            
+                                            // Auto-detect Bias on first instruction (or first few)
+                                            if current_clnum == 1 {
+                                                if let Some(ep) = ipc_db.get_entry_point() {
+                                                    let bias = (*pc as i64) - (ep as i64);
+                                                    if bias != 0 {
+                                                        println!("[INFO] Detected PIE/ASLR bias: {:x} (PC={:x}, Entry={:x})", bias, pc, ep);
+                                                        ipc_db.set_bias(bias);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        ipc_db.add_instruction(current_clnum, bytes.clone());
+                                        if let Some(d) = disasm {
+                                            ipc_db.add_instruction_disasm(current_clnum, d.clone());
+                                        }
 
-                                    ipc_db.add_change(Change {
+                                        ipc_db.add_change(Change {
                                         address: *pc,
                                         data: 0,
                                         clnum: current_clnum,
@@ -167,53 +185,70 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
-                            match client_msg {
-                                ClientMessage::QueryState { clnum } => {
-                                    let regs = db.get_registers_at(clnum);
-                                    let mem = db.get_memory_at(clnum, 0, 256);
-                                    let disasm = db.get_disassembly_at(clnum);
-                                    let response = ServerMessage::StateUpdate {
-                                        clnum,
-                                        registers: regs,
-                                        memory: mem,
-                                        memory_addr: 0,
-                                        disassembly: disasm,
-                                    };
-                                    if let Ok(json) = serde_json::to_string(&response) {
-                                        let _ = socket.send(Message::Text(json)).await;
+                        // Debug log: received message
+                        // println!("Received: {}", text); // Too verbose for all messages
+
+                        match serde_json::from_str::<ClientMessage>(&text) {
+                            Ok(client_msg) => {
+                                match client_msg {
+                                    ClientMessage::QueryState { clnum } => {
+                                        let regs = db.get_registers_at(clnum);
+                                        let mem = db.get_memory_at(clnum, 0, 256);
+                                        let disasm = db.get_disassembly_at(clnum);
+                                        let response = ServerMessage::StateUpdate {
+                                            clnum,
+                                            registers: regs,
+                                            memory: mem,
+                                            memory_addr: 0,
+                                            disassembly: disasm,
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = socket.send(Message::Text(json)).await;
+                                        }
+                                    }
+                                    ClientMessage::GetTraceLog { start, count, only_user_code } => {
+                                        // println!("[DEBUG] GetTraceLog: start={}, count={}, only_user_code={}", start, count, only_user_code);
+                                        let entries = db.get_trace_log(start, count, only_user_code);
+                                        // println!("[DEBUG] GetTraceLog: returning {} entries", entries.len());
+                                        let response = ServerMessage::TraceLog { entries };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = socket.send(Message::Text(json)).await;
+                                        }
+                                    }
+                                    ClientMessage::StepForward { current } => {
+                                        let next_clnum = (current + 1).min(max_clnum.load(Ordering::Relaxed));
+                                        let regs = db.get_registers_at(next_clnum);
+                                        let mem = db.get_memory_at(next_clnum, 0, 256);
+                                        let response = ServerMessage::StateUpdate {
+                                            clnum: next_clnum,
+                                            registers: regs,
+                                            memory: mem,
+                                            memory_addr: 0,
+                                            disassembly: db.get_disassembly_at(next_clnum),
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = socket.send(Message::Text(json)).await;
+                                        }
+                                    }
+                                    ClientMessage::StepBackward { current } => {
+                                        let prev_clnum = current.saturating_sub(1).max(1);
+                                        let regs = db.get_registers_at(prev_clnum);
+                                        let mem = db.get_memory_at(prev_clnum, 0, 256);
+                                        let response = ServerMessage::StateUpdate {
+                                            clnum: prev_clnum,
+                                            registers: regs,
+                                            memory: mem,
+                                            memory_addr: 0,
+                                            disassembly: db.get_disassembly_at(prev_clnum),
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = socket.send(Message::Text(json)).await;
+                                        }
                                     }
                                 }
-                                ClientMessage::StepForward { current } => {
-                                    let next_clnum = (current + 1).min(max_clnum.load(Ordering::Relaxed));
-                                    let regs = db.get_registers_at(next_clnum);
-                                    let mem = db.get_memory_at(next_clnum, 0, 256);
-                                    let response = ServerMessage::StateUpdate {
-                                        clnum: next_clnum,
-                                        registers: regs,
-                                        memory: mem,
-                                        memory_addr: 0,
-                                        disassembly: db.get_disassembly_at(next_clnum),
-                                    };
-                                    if let Ok(json) = serde_json::to_string(&response) {
-                                        let _ = socket.send(Message::Text(json)).await;
-                                    }
-                                }
-                                ClientMessage::StepBackward { current } => {
-                                    let prev_clnum = current.saturating_sub(1).max(1);
-                                    let regs = db.get_registers_at(prev_clnum);
-                                    let mem = db.get_memory_at(prev_clnum, 0, 256);
-                                    let response = ServerMessage::StateUpdate {
-                                        clnum: prev_clnum,
-                                        registers: regs,
-                                        memory: mem,
-                                        memory_addr: 0,
-                                        disassembly: db.get_disassembly_at(prev_clnum),
-                                    };
-                                    if let Ok(json) = serde_json::to_string(&response) {
-                                        let _ = socket.send(Message::Text(json)).await;
-                                    }
-                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[ERROR] Failed to parse ClientMessage: {} | Text: {}", e, text);
                             }
                         }
                     }
