@@ -21,6 +21,7 @@ enum ServerMessage {
         registers: Vec<u64>,
         memory: Vec<u8>,
         memory_addr: u64,
+        disassembly: String,
     },
     TraceEvent(serde_json::Value),
     MaxClnum {
@@ -35,6 +36,7 @@ pub fn app() -> Html {
     let max_clnum = use_state(|| 0u32);
     let registers = use_state(|| vec![0u64; 16]);
     let memory = use_state(|| vec![0u8; 256]);
+    let current_disasm = use_state(|| String::from("Waiting for trace..."));
     let ws_sender = use_state(|| None::<futures::channel::mpsc::UnboundedSender<Message>>);
 
     {
@@ -43,6 +45,7 @@ pub fn app() -> Html {
         let max_clnum = max_clnum.clone();
         let registers = registers.clone();
         let memory = memory.clone();
+        let current_disasm = current_disasm.clone();
         let ws_sender = ws_sender.clone();
 
         use_effect_with((), move |_| {
@@ -70,15 +73,17 @@ pub fn app() -> Html {
                                     clnum,
                                     registers: regs,
                                     memory: mem,
+                                    disassembly,
                                     ..
                                 } => {
                                     current_clnum.set(clnum);
                                     registers.set(regs);
                                     memory.set(mem);
+                                    current_disasm.set(disassembly);
                                 }
                                 ServerMessage::MaxClnum { max } => {
                                     max_clnum.set(max);
-                                    current_clnum.set(0);
+                                    // Don't reset current_clnum here, it disturbs tracing
                                 }
                                 ServerMessage::TraceEvent(_) => {
                                     // Keep raw JSON for display
@@ -201,11 +206,17 @@ pub fn app() -> Html {
                     }
                 </div>
 
-                // Trace (Disassembly) Panel
-                <div class="panel trace">
-                    <div class="header">{ "EXECUTION TRACE" }</div>
-                    // Controls
-                    <div class="controls">
+                        // Trace (Disassembly) Panel
+                        <div class="panel trace">
+                            <div class="header">{ "EXECUTION TRACE" }</div>
+
+                            // Current Instruction Display
+                            <div style="padding: 10px; background: #2d2d2d; border-bottom: 1px solid #444; font-size: 14px; color: #4ec9b0;">
+                                { &*current_disasm }
+                            </div>
+
+                            // Controls
+                            <div class="controls">
                         <div class="controls-inner">
                             <button onclick={on_step_backward.clone()} style="padding: 5px 10px; background: #333; color: #d4d4d4; border: 1px solid #555; cursor: pointer;">{ "◀ Step Back" }</button>
                             <input

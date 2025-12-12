@@ -138,24 +138,27 @@ koradar/
 - [x] QEMU TCG Plugin integration
 - [x] Basic WebSocket communication
 - [x] 3-pane UI layout
-
-### Phase 2: Timeless Logic & Enhanced UI (Current)
 - [x] Binary loading (ELF/PE)
 - [x] TraceDB implementation
 - [x] Timeless navigation (slider, step buttons)
-- [ ] Disassembly display
-- [ ] Enhanced memory visualization
 
-### Phase 3: AI Integration
-- [ ] LLM integration (OpenAI/Ollama)
-- [ ] Interactive chat interface
-- [ ] Context-aware explanations
-- [ ] Response caching
+### Phase 2: Core Analysis & UX (Current)
+- [ ] Disassembly display (`capstone`)
+- [ ] Control Flow Graph (CFG) visualization
+- [ ] URL-based state sharing
+- [ ] Enhanced memory visualization (heat map)
 
-### Phase 4: Advanced Features
+### Phase 3: AI-Powered Analysis
+- [ ] Context-aware prompting engine
+- [ ] Semantic lifting (auto-renaming)
+- [ ] Root cause analysis
+- [ ] Local/Cloud hybrid LLM support
+
+### Phase 4: Production UI & Ecosystem
+- [ ] WebGL/WebGPU visualization
+- [ ] Data flow graph
 - [ ] WASM plugin system
 - [ ] Performance optimizations
-- [ ] Search functionality
 
 ## License
 

@@ -1,8 +1,8 @@
-use qemu_plugin::sys::*;
+use qemu_plugin_sys::*;
 use serde::Serialize;
 use std::io::Write;
+use std::net::TcpStream;
 use std::os::raw::{c_char, c_int, c_void};
-use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 
 // Define the protocol structs locally or share via a common crate if possible.
@@ -28,7 +28,7 @@ enum TraceEvent {
 
 struct TracerState {
     insn_count: u64,
-    stream: Option<UnixStream>,
+    stream: Option<TcpStream>,
 }
 
 static STATE: Mutex<TracerState> = Mutex::new(TracerState {
@@ -41,11 +41,17 @@ fn send_event(event: TraceEvent) {
     let mut state = STATE.lock().unwrap();
     if state.stream.is_none() {
         // Try to connect on first send
-        if let Ok(stream) = UnixStream::connect("/tmp/koradar.sock") {
+        // Use host.docker.internal for macOS Docker, or localhost for native
+        let addr = "host.docker.internal:3001";
+        if let Ok(stream) = TcpStream::connect(addr) {
             state.stream = Some(stream);
-            println!("Koradar Tracer: Connected to server");
+            println!("Koradar Tracer: Connected to server at {}", addr);
+        } else if let Ok(stream) = TcpStream::connect("127.0.0.1:3001") {
+            // Fallback to localhost (e.g. Linux native)
+            state.stream = Some(stream);
+            println!("Koradar Tracer: Connected to server at 127.0.0.1:3001");
         } else {
-            // Failed to connect, maybe server not running. Ignore or retry later.
+            // Failed to connect
             return;
         }
     }
@@ -113,6 +119,10 @@ extern "C" fn vcpu_tb_trans(_id: qemu_plugin_id_t, tb: *mut qemu_plugin_tb) {
 }
 
 // --- Entry Point ---
+
+#[no_mangle]
+#[used]
+pub static qemu_plugin_version: c_int = 2;
 
 #[no_mangle]
 pub extern "C" fn qemu_plugin_install(

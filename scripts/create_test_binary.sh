@@ -35,7 +35,7 @@ if command -v docker >/dev/null 2>&1; then
         ubuntu:20.04 \
         bash -c "apt-get update -qq >/dev/null 2>&1 && \
                  apt-get install -y -qq gcc >/dev/null 2>&1 && \
-                 gcc -static -o $OUTPUT hello.c && \
+                 gcc -static -no-pie -o $OUTPUT hello.c && \
                  chmod +x $OUTPUT"
     if [ -f "$OUTPUT" ]; then
         echo "✓ Created: $OUTPUT"
@@ -47,7 +47,7 @@ fi
 # Try cross-compiler
 if command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; then
     echo "Using cross-compiler..."
-    x86_64-linux-gnu-gcc -static -o "$OUTPUT" "$TMPDIR/hello.c"
+    x86_64-linux-gnu-gcc -static -no-pie -o "$OUTPUT" "$TMPDIR/hello.c"
     if [ -f "$OUTPUT" ]; then
         echo "✓ Created: $OUTPUT"
         file "$OUTPUT"

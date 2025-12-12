@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y \
     ninja-build \
     python3 \
     python3-pip \
+    python3-tomli \
     pkg-config \
     libglib2.0-dev \
     libpixman-1-dev \
@@ -47,14 +48,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /qemu-build
 
-# Copy QEMU source if it exists, otherwise clone it
-COPY qemu-src /qemu-src 2>/dev/null || true
-
-CMD ["/bin/bash", "-c", "if [ ! -d /qemu-src ]; then git clone --depth 1 --branch master https://github.com/qemu/qemu.git /qemu-src; fi && \
-cd /qemu-src && \
-./configure --prefix=/qemu-build/install --target-list=x86_64-softmmu,x86_64-linux-user --enable-plugins --enable-debug-tcg --disable-werror --disable-docs && \
-make -j\$(nproc) && \
-make install"]
+CMD ["/bin/bash"]
 DOCKER_EOF
 
 echo "Building QEMU in Docker container (this will take 10-30 minutes)..."
@@ -63,9 +57,21 @@ echo ""
 # Build QEMU in Docker (force x86_64 platform)
 docker build --platform linux/amd64 -f Dockerfile.qemu -t koradar-qemu-builder .
 
+# Ensure output directory exists
+mkdir -p qemu-build-docker
+
 # Run the build (force x86_64 platform)
-docker run --rm --platform linux/amd64 -v "$(pwd):/host" koradar-qemu-builder bash -c "
-    if [ ! -d /qemu-src ]; then
+# We mount the current directory to /host so we can copy artifacts back
+# We try to use local qemu-src if available (mounted to /qemu-src), otherwise clone inside container
+if [ -d "qemu-src" ]; then
+    MOUNT_SRC="-v $(pwd)/qemu-src:/qemu-src"
+else
+    MOUNT_SRC=""
+fi
+
+docker run --rm --platform linux/amd64 -v "$(pwd):/host" $MOUNT_SRC koradar-qemu-builder bash -c "
+    if [ ! -d /qemu-src ] || [ -z \"\$(ls -A /qemu-src)\" ]; then
+        echo 'Cloning QEMU...'
         git clone --depth 1 --branch master https://github.com/qemu/qemu.git /qemu-src
     fi
     cd /qemu-src

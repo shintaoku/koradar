@@ -1,4 +1,5 @@
 pub mod db;
+pub mod disasm;
 pub mod il;
 pub mod loader;
 pub mod protocol;

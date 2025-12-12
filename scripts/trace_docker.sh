@@ -51,7 +51,7 @@ fi
 # Run QEMU with tracer in Docker
 echo "Running QEMU with tracer in Docker (x86_64)..."
 echo "Note: Make sure the server is running (make run) in another terminal"
-echo "      Server should be listening on /tmp/koradar.sock"
+echo "      Server should be listening on 0.0.0.0:3001"
 echo ""
 docker run --rm -it --platform linux/amd64 \
     -v "$(pwd)/qemu-build-docker/bin:/qemu-bin:ro" \
@@ -59,7 +59,7 @@ docker run --rm -it --platform linux/amd64 \
     -v "$(realpath $BINARY):/binary:ro" \
     -v /tmp:/tmp \
     --network host \
-    ubuntu:22.04 \
+    koradar-qemu-builder \
     /qemu-bin/qemu-x86_64 \
     -plugin /plugins/libkoradar_tracer.so \
     /binary

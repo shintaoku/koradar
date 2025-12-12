@@ -1,4 +1,7 @@
-.PHONY: all setup build build-frontend build-server build-tracer run trace test-binary clean
+.PHONY: all setup build build-frontend build-server build-tracer build-tracer-linux run trace test-binary clean
+
+# Detect OS
+UNAME_S := $(shell uname -s)
 
 # Default target
 all: build
@@ -11,7 +14,11 @@ setup:
 	rustup target add wasm32-unknown-unknown
 
 # Build everything
+# On macOS, also build the Linux tracer for Docker use
 build: build-frontend build-server build-tracer
+ifeq ($(UNAME_S),Darwin)
+	@$(MAKE) build-tracer-linux
+endif
 
 build-frontend:
 	@echo "Building Frontend..."
@@ -22,14 +29,31 @@ build-server:
 	cargo build --release -p koradar-server
 
 build-tracer:
-	@echo "Building Tracer..."
+	@echo "Building Tracer (Local)..."
 	cargo build --release -p koradar-tracer
+
+# Build tracer for Linux (used by Docker on macOS)
+build-tracer-linux:
+	@echo "Building Tracer for Linux (Docker)..."
+	@if command -v docker >/dev/null 2>&1; then \
+		docker run --rm --platform linux/amd64 \
+			-v "$$(pwd):/workspace" \
+			-w /workspace \
+			rust:latest \
+			bash -c "rustup target add x86_64-unknown-linux-gnu && cargo build --release -p koradar-tracer --target x86_64-unknown-linux-gnu"; \
+	else \
+		echo "Docker not found, skipping Linux tracer build."; \
+	fi
 
 # Run the Server (Back-end + Front-end hosting)
 # Access http://localhost:3000 after running this
-run: build-frontend build-server
+run:
 	@echo "Starting Server at http://localhost:3000 ..."
-	cargo run --release -p koradar-server
+	@if [ -n "$(BINARY)" ]; then \
+		cargo run --release -p koradar-server -- $(BINARY); \
+	else \
+		cargo run --release -p koradar-server; \
+	fi
 
 # Run QEMU with Tracer Plugin (Run this in a separate terminal)
 # Usage: make trace [BINARY=/path/to/binary] [DOCKER=1]

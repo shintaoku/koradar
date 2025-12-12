@@ -9,16 +9,15 @@ use axum::{
 };
 use koradar_core::{
     protocol::{ClientMessage, ServerMessage, TraceEvent},
-    Change, ChangeFlags, TraceDB,
+    BinaryLoader, Change, ChangeFlags, TraceDB,
 };
 use serde_json;
+use std::env;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::UnixListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tower_http::services::ServeDir;
 
 struct AppState {
@@ -27,55 +26,25 @@ struct AppState {
     max_clnum: Arc<std::sync::atomic::AtomicU32>,
 }
 
-// Helper function for sending log entry to channel
-async fn send_log(log_tx: &mpsc::Sender<String>, entry: serde_json::Value) {
-    if let Ok(json_string) = serde_json::to_string(&entry) {
-        let _ = log_tx.send(json_string).await;
-    }
-}
-
 #[tokio::main]
 async fn main() {
-    // #region agent log
-    let log_path = "/Users/shinta/git/github.com/geohot/qira/.cursor/debug.log";
-    let (log_tx, mut log_rx) = mpsc::channel::<String>(1000);
-
-    // Spawn dedicated log writer task
-    let log_path_writer = log_path.to_string();
-    tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
-        let mut file = match tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path_writer)
-            .await
-        {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-
-        while let Some(line) = log_rx.recv().await {
-            let _ = file.write_all(line.as_bytes()).await;
-            let _ = file.write_all(b"\n").await;
-            let _ = file.flush().await;
-        }
-    });
-
-    let log_entry = serde_json::json!({
-        "sessionId": "debug-session",
-        "runId": "server-startup",
-        "hypothesisId": "A",
-        "location": "server/src/main.rs:25",
-        "message": "Server starting",
-        "data": {},
-        "timestamp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis()
-    });
-    send_log(&log_tx, log_entry).await;
-    // #endregion
-
     println!("Koradar Server Starting...");
 
     let db = Arc::new(TraceDB::new(16));
+
+    // Load binary if provided
+    let args: Vec<String> = env::args().collect();
+    if args.len() > 1 {
+        let binary_path = &args[1];
+        println!("Loading binary: {}", binary_path);
+        match BinaryLoader::load_file(&db, Path::new(binary_path)) {
+            Ok(_) => {
+                println!("Binary loaded successfully");
+            }
+            Err(e) => eprintln!("Failed to load binary: {}", e),
+        }
+    }
+
     let (tx, _rx) = broadcast::channel(100);
     let max_clnum = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let state = Arc::new(AppState {
@@ -90,19 +59,13 @@ async fn main() {
     let ipc_max_clnum = max_clnum.clone();
 
     tokio::spawn(async move {
-        let socket_path = "/tmp/koradar.sock";
-
-        if Path::new(socket_path).exists() {
-            let _ = std::fs::remove_file(socket_path);
-        }
-
-        let listener = match UnixListener::bind(socket_path) {
+        let listener = match tokio::net::TcpListener::bind("0.0.0.0:3001").await {
             Ok(l) => {
-                println!("IPC Listener listening on {}", socket_path);
+                println!("IPC Listener listening on 0.0.0.0:3001");
                 l
             }
             Err(e) => {
-                panic!("Failed to bind Unix socket: {}", e);
+                panic!("Failed to bind IPC TCP socket: {}", e);
             }
         };
 
@@ -132,8 +95,10 @@ async fn main() {
                                 TraceEvent::InsnExec {
                                     vcpu_index: _,
                                     pc,
-                                    bytes: _,
+                                    bytes,
                                 } => {
+                                    ipc_db.add_instruction(current_clnum, bytes.clone());
+
                                     ipc_db.add_change(Change {
                                         address: *pc,
                                         data: 0,
@@ -150,6 +115,12 @@ async fn main() {
                             // Broadcast as ServerMessage::TraceEvent
                             let server_msg = ServerMessage::TraceEvent(event);
                             if let Ok(json_str) = serde_json::to_string(&server_msg) {
+                                let _ = ipc_tx.send(json_str);
+                            }
+
+                            // Broadcast MaxClnum
+                            let max_msg = ServerMessage::MaxClnum { max: current_clnum };
+                            if let Ok(json_str) = serde_json::to_string(&max_msg) {
                                 let _ = ipc_tx.send(json_str);
                             }
                         }
@@ -201,11 +172,13 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                 ClientMessage::QueryState { clnum } => {
                                     let regs = db.get_registers_at(clnum);
                                     let mem = db.get_memory_at(clnum, 0, 256);
+                                    let disasm = db.get_disassembly_at(clnum);
                                     let response = ServerMessage::StateUpdate {
                                         clnum,
                                         registers: regs,
                                         memory: mem,
                                         memory_addr: 0,
+                                        disassembly: disasm,
                                     };
                                     if let Ok(json) = serde_json::to_string(&response) {
                                         let _ = socket.send(Message::Text(json)).await;
@@ -220,6 +193,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                         registers: regs,
                                         memory: mem,
                                         memory_addr: 0,
+                                        disassembly: db.get_disassembly_at(next_clnum),
                                     };
                                     if let Ok(json) = serde_json::to_string(&response) {
                                         let _ = socket.send(Message::Text(json)).await;
@@ -234,6 +208,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                         registers: regs,
                                         memory: mem,
                                         memory_addr: 0,
+                                        disassembly: db.get_disassembly_at(prev_clnum),
                                     };
                                     if let Ok(json) = serde_json::to_string(&response) {
                                         let _ = socket.send(Message::Text(json)).await;
