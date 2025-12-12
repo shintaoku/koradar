@@ -1,9 +1,16 @@
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::{futures::WebSocket, Message};
 use serde::{Deserialize, Serialize};
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{Event, HtmlInputElement};
 use yew::prelude::*;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = renderMermaid)]
+    fn render_mermaid(id: &str, text: &str) -> js_sys::Promise;
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct TraceEntry {
@@ -31,6 +38,9 @@ enum ClientMessage {
     StepBackward {
         current: u32,
     },
+    GetCFG {
+        only_user_code: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -50,6 +60,9 @@ enum ServerMessage {
     MaxClnum {
         max: u32,
     },
+    CFG {
+        graph: String,
+    },
 }
 
 #[function_component(App)]
@@ -62,9 +75,10 @@ pub fn app() -> Html {
     let current_disasm = use_state(|| String::from("Waiting for trace..."));
     let ws_sender = use_state(|| None::<futures::channel::mpsc::UnboundedSender<Message>>);
 
-    let view_mode = use_state(|| "timeline"); // "log" or "timeline"
+    let view_mode = use_state(|| "timeline"); // "log" or "timeline" or "cfg"
     let only_user_code = use_state(|| false);
     let timeline_entries = use_state(Vec::<TraceEntry>::new);
+    let cfg_graph = use_state(|| String::new());
 
     {
         let trace_log = trace_log.clone();
@@ -75,6 +89,7 @@ pub fn app() -> Html {
         let current_disasm = current_disasm.clone();
         let ws_sender = ws_sender.clone();
         let timeline_entries = timeline_entries.clone();
+        let cfg_graph = cfg_graph.clone();
 
         use_effect_with((), move |_| {
             let ws = WebSocket::open("ws://localhost:3000/ws").unwrap();
@@ -125,6 +140,14 @@ pub fn app() -> Html {
                                             current.remove(0);
                                         }
                                         current
+                                    });
+                                }
+                                ServerMessage::CFG { graph } => {
+                                    cfg_graph.set(graph.clone());
+                                    // Trigger render
+                                    spawn_local(async move {
+                                        let promise = render_mermaid("cfg-view", &graph);
+                                        let _ = JsFuture::from(promise).await;
                                     });
                                 }
                             }
@@ -194,58 +217,34 @@ pub fn app() -> Html {
 
     let toggle_view = {
         let view_mode = view_mode.clone();
+        let ws_sender = ws_sender.clone();
+        let only_user_code = *only_user_code;
+
         Callback::from(move |_: MouseEvent| {
             if *view_mode == "log" {
                 view_mode.set("timeline");
+            } else if *view_mode == "timeline" {
+                view_mode.set("cfg");
+                // Fetch CFG
+                if let Some(sender) = &*ws_sender {
+                    let msg = ClientMessage::GetCFG { only_user_code };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = sender.unbounded_send(Message::Text(json));
+                    }
+                }
             } else {
                 view_mode.set("log");
             }
         })
     };
 
-    let fetch_timeline = {
-        let ws_sender = ws_sender.clone();
-        let current_clnum = current_clnum.clone();
-        let only_user_code = *only_user_code;
-        Callback::from(move |_: MouseEvent| {
-            // Fetch around current clnum
-            let center = *current_clnum;
-            let start = center.saturating_sub(50);
-            let count = 100;
-
-            if let Some(sender) = &*ws_sender {
-                let msg = ClientMessage::GetTraceLog {
-                    start,
-                    count,
-                    only_user_code,
-                };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = sender.unbounded_send(Message::Text(json));
-                }
-            }
-        })
-    };
-
     let toggle_user_code = {
         let only_user_code = only_user_code.clone();
-        let ws_sender = ws_sender.clone();
         Callback::from(move |e: Event| {
             let target: Option<HtmlInputElement> = e.target_dyn_into();
             if let Some(input) = target {
                 let val = input.checked();
                 only_user_code.set(val);
-
-                // Re-fetch timeline
-                if let Some(sender) = &*ws_sender {
-                    let msg = ClientMessage::GetTraceLog {
-                        start: 0, // Reset to 0 or keep current? For now, fetch from 0 to see overview
-                        count: 1000,
-                        only_user_code: val,
-                    };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = sender.unbounded_send(Message::Text(json));
-                    }
-                }
             }
         })
     };
@@ -272,6 +271,15 @@ pub fn app() -> Html {
                         let msg = ClientMessage::GetTraceLog {
                             start,
                             count,
+                            only_user_code: **only_user_code,
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = sender.unbounded_send(Message::Text(json));
+                        }
+                    }
+                } else if **view_mode == "cfg" {
+                    if let Some(sender) = &*ws_sender {
+                        let msg = ClientMessage::GetCFG {
                             only_user_code: **only_user_code,
                         };
                         if let Ok(json) = serde_json::to_string(&msg) {
@@ -344,9 +352,16 @@ pub fn app() -> Html {
                     <div class="header">
                         <span>{ "EXECUTION TRACE" }</span>
                         <div>
-                             <button onclick={toggle_view} style="font-size: 10px; margin-right: 5px;">{ if *view_mode == "log" { "Switch to Timeline" } else { "Switch to Raw Log" } }</button>
+                             <button onclick={toggle_view} style="font-size: 10px; margin-right: 5px;">
+                                { match *view_mode {
+                                    "log" => "Switch to Timeline",
+                                    "timeline" => "Switch to CFG",
+                                    "cfg" => "Switch to Raw Log",
+                                    _ => "Unknown"
+                                } }
+                             </button>
                              {
-                                if *view_mode == "timeline" {
+                                if *view_mode == "timeline" || *view_mode == "cfg" {
                                     html! {
                                         <label style="font-size: 10px; cursor: pointer;">
                                             <input type="checkbox" checked={*only_user_code} onchange={toggle_user_code} />
@@ -389,6 +404,13 @@ pub fn app() -> Html {
                                     for trace_log.iter().map(|line| html! {
                                         <div class="log-entry">{ line }</div>
                                     })
+                                }
+                            } else if *view_mode == "cfg" {
+                                html! {
+                                    <div id="cfg-view" style="width: 100%; height: 100%; overflow: auto; background: white;">
+                                        // Mermaid will render here
+                                        { "Loading CFG..." }
+                                    </div>
                                 }
                             } else {
                                 html! {

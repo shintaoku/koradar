@@ -138,7 +138,7 @@ extern "C" fn vcpu_tb_trans(_id: qemu_plugin_id_t, tb: *mut qemu_plugin_tb) {
             
             // Try haddr first (more reliable for reading bytes)
             let haddr = qemu_plugin_insn_haddr(insn);
-            let mut captured = false;
+            let captured;
 
             if !haddr.is_null() {
                 std::ptr::copy_nonoverlapping(haddr as *const u8, bytes.as_mut_ptr(), size);

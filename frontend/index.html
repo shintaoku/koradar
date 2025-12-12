@@ -4,6 +4,45 @@
         <meta charset="utf-8" />
         <title>Koradar</title>
         <link data-trunk rel="css" href="style.css" />
+        <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+        <script>
+            mermaid.initialize({ 
+                startOnLoad: false,
+                maxTextSize: 10000000, // 10MB
+                maxEdges: 5000,
+                securityLevel: 'loose'
+            });
+            window.renderMermaid = async function(elementId, graphDefinition) {
+                const element = document.getElementById(elementId);
+                if (element) {
+                    element.removeAttribute('data-processed'); // Force re-render if needed (though we use render api)
+                    try {
+                         // mermaid.render returns an object { svg: string } in v10+
+                        const { svg } = await mermaid.render('graph-' + elementId + '-' + Date.now(), graphDefinition);
+                        element.innerHTML = svg;
+
+                        // Enable Zoom/Pan
+                        const svgElement = element.querySelector('svg');
+                        if (svgElement) {
+                            svgElement.style.width = '100%';
+                            svgElement.style.height = '100%';
+                            svgPanZoom(svgElement, {
+                                zoomEnabled: true,
+                                controlIconsEnabled: true,
+                                fit: true,
+                                center: true,
+                                minZoom: 0.01,
+                                maxZoom: 100
+                            });
+                        }
+                    } catch (e) {
+                        console.error('Mermaid render error:', e);
+                        element.innerHTML = '<pre style="color:red">Mermaid Error: ' + e.message + '</pre>';
+                    }
+                }
+            };
+        </script>
     </head>
     <body>
     </body>

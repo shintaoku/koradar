@@ -51,6 +51,10 @@ pub enum ClientMessage {
     StepBackward {
         current: u32,
     },
+    GetCFG {
+        #[serde(default)]
+        only_user_code: bool,
+    },
 }
 
 // Server -> Client messages (beyond raw TraceEvent)
@@ -70,5 +74,8 @@ pub enum ServerMessage {
     },
     MaxClnum {
         max: u32,
+    },
+    CFG {
+        graph: String,
     },
 }

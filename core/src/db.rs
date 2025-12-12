@@ -50,7 +50,7 @@ impl MemoryCell {
 }
 
 pub struct TraceDB {
-    changes: RwLock<Vec<Change>>,
+    pub(crate) changes: RwLock<Vec<Change>>,
     memory: DashMap<Address, MemoryCell>,
     registers: RwLock<Vec<Vec<(Clnum, u64)>>>,
     // Reverse index: (Address, AccessType ('R'|'W')) -> List of Clnums
@@ -60,7 +60,7 @@ pub struct TraceDB {
     // Instruction cache: (Address, Instruction Bytes) -> Disassembled String
     insn_cache: DashMap<(Address, Vec<u8>), String>,
     // Map from Clnum to instruction bytes
-    instructions: DashMap<Clnum, Vec<u8>>,
+    pub(crate) instructions: DashMap<Clnum, Vec<u8>>,
     // Map from Clnum to disassembly string (fallback if bytes unavailable or disasm failed)
     instructions_disasm: DashMap<Clnum, String>,
     // User code ranges (start, end) inclusive
@@ -99,6 +99,19 @@ impl TraceDB {
     }
 
     pub fn set_bias(&self, bias: i64) {
+        // #region agent log
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            let path = "/tmp/koradar_debug.log";
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                 let _ = writeln!(file, "{{\"id\":\"log_db_bias\",\"timestamp\":{},\"location\":\"db:set_bias\",\"message\":\"Set Bias\",\"data\":{{\"bias\":{}}},\"sessionId\":\"debug-session\"}}", 
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+                    bias
+                 );
+            }
+        }
+        // #endregion
         *self.bias.write() = bias;
         println!("[DEBUG] TraceDB: Bias set to {:x} (RunAddr - StaticAddr)", bias);
     }
@@ -119,6 +132,20 @@ impl TraceDB {
     }
 
     pub fn register_code_range(&self, start: u64, size: u64) {
+        // #region agent log
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            let path = "/tmp/koradar_debug.log";
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                 let _ = writeln!(file, "{{\"id\":\"log_db_range\",\"timestamp\":{},\"location\":\"db:register_code_range\",\"message\":\"Register Range\",\"data\":{{\"start\":{}, \"end\":{}}},\"sessionId\":\"debug-session\"}}", 
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+                    start, start + size
+                 );
+            }
+        }
+        // #endregion
+
         println!(
             "[DEBUG] register_code_range: {:x} - {:x}",
             start,

@@ -4,12 +4,51 @@
         <meta charset="utf-8" />
         <title>Koradar</title>
         <link rel="stylesheet" href="/style-51e35e116b96ce9.css" integrity="sha384-11+cjeSDe7pXa8FFzNxoNA2jC5uyCv55DJmaU60Hc8tIZvmjwTKZIArU9HiyZMUQ"/>
-    <link rel="modulepreload" href="/koradar-frontend-a31558176d5288e3.js" crossorigin="anonymous" integrity="sha384-75LxxDA7mBWvMTFRuUhekbymsIyw5rdyHAx5FbIDehGaG+XmrdOmMfZwA1np8Spa"><link rel="preload" href="/koradar-frontend-a31558176d5288e3_bg.wasm" crossorigin="anonymous" integrity="sha384-lup1kOGbSO5sF6wzjPsskMIMvBqjpyEY2X85/gg+uYMsYR/w005fu4a33WaClBQd" as="fetch" type="application/wasm"></head>
+        <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+        <script>
+            mermaid.initialize({ 
+                startOnLoad: false,
+                maxTextSize: 10000000, // 10MB
+                maxEdges: 5000,
+                securityLevel: 'loose'
+            });
+            window.renderMermaid = async function(elementId, graphDefinition) {
+                const element = document.getElementById(elementId);
+                if (element) {
+                    element.removeAttribute('data-processed'); // Force re-render if needed (though we use render api)
+                    try {
+                         // mermaid.render returns an object { svg: string } in v10+
+                        const { svg } = await mermaid.render('graph-' + elementId + '-' + Date.now(), graphDefinition);
+                        element.innerHTML = svg;
+
+                        // Enable Zoom/Pan
+                        const svgElement = element.querySelector('svg');
+                        if (svgElement) {
+                            svgElement.style.width = '100%';
+                            svgElement.style.height = '100%';
+                            svgPanZoom(svgElement, {
+                                zoomEnabled: true,
+                                controlIconsEnabled: true,
+                                fit: true,
+                                center: true,
+                                minZoom: 0.01,
+                                maxZoom: 100
+                            });
+                        }
+                    } catch (e) {
+                        console.error('Mermaid render error:', e);
+                        element.innerHTML = '<pre style="color:red">Mermaid Error: ' + e.message + '</pre>';
+                    }
+                }
+            };
+        </script>
+    <link rel="modulepreload" href="/koradar-frontend-2fe881530148f1a8.js" crossorigin="anonymous" integrity="sha384-cNHOu5Fb8lbfYlr4GipceeHA8lJgERtk5265AnRoYX3WCqi7jQIs1hVriAes8MQY"><link rel="preload" href="/koradar-frontend-2fe881530148f1a8_bg.wasm" crossorigin="anonymous" integrity="sha384-ohiQmfSbOQLTD9DU0fyQ/YghcXuxUu+NlsPiRyIrYKXSGB7L99Up029NDjKclfBw" as="fetch" type="application/wasm"></head>
     <body>
     
 <script type="module">
-import init, * as bindings from '/koradar-frontend-a31558176d5288e3.js';
-const wasm = await init({ module_or_path: '/koradar-frontend-a31558176d5288e3_bg.wasm' });
+import init, * as bindings from '/koradar-frontend-2fe881530148f1a8.js';
+const wasm = await init({ module_or_path: '/koradar-frontend-2fe881530148f1a8_bg.wasm' });
 
 
 window.wasmBindings = bindings;

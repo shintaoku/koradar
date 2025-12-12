@@ -245,6 +245,16 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                             let _ = socket.send(Message::Text(json)).await;
                                         }
                                     }
+                                    ClientMessage::GetCFG { only_user_code } => {
+                                        // TODO: Run in blocking task if heavy
+                                        let cfg = db.analyze_cfg(only_user_code);
+                                        let mermaid = cfg.to_mermaid();
+                                        println!("[INFO] Generated CFG size: {} bytes", mermaid.len());
+                                        let response = ServerMessage::CFG { graph: mermaid };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = socket.send(Message::Text(json)).await;
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {

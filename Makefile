@@ -64,49 +64,28 @@ run:
 trace: build-tracer
 	@echo "Starting QEMU with Tracer..."
 	@if [ -z "$(BINARY)" ]; then \
-		echo "═══════════════════════════════════════════════════════════"; \
-		echo "⚠️  No binary specified - Starting QEMU system emulation"; \
-		echo "═══════════════════════════════════════════════════════════"; \
-		echo ""; \
-		echo "This will show 'No bootable device' - this is EXPECTED behavior."; \
-		echo "System emulation mode requires a kernel/disk image to boot."; \
-		echo ""; \
-		echo "To actually trace a Linux binary:"; \
-		if [ "$(UNAME_S)" = "Darwin" ]; then \
-			echo "  ./scripts/trace_docker.sh /path/to/binary"; \
-			echo "  (macOS requires Docker for linux-user mode)"; \
-		else \
-			echo "  make trace BINARY=/path/to/binary"; \
+		echo "Error: BINARY is not specified."; \
+		echo "Usage: make trace BINARY=/path/to/binary [DOCKER=1]"; \
+		exit 1; \
+	fi
+	@echo "Tracing binary: $(BINARY)"
+	@if [ "$(UNAME_S)" = "Darwin" ]; then \
+		if [ "$(DOCKER)" != "1" ]; then \
+			echo "Error: On macOS, linux-user mode requires Docker."; \
+			echo "  Run: make trace BINARY=$(BINARY) DOCKER=1"; \
+			echo "  Or use: ./scripts/trace_docker.sh $(BINARY)"; \
+			exit 1; \
 		fi; \
-		echo ""; \
-		echo "To exit: Press Ctrl+C or type 'quit' in the QEMU monitor."; \
-		echo "═══════════════════════════════════════════════════════════"; \
-		echo ""; \
-		./qemu-build/bin/qemu-system-x86_64 \
-			-plugin ./target/release/libkoradar_tracer.dylib \
-			-monitor stdio \
-			-display none \
-			-no-reboot; \
+		./scripts/trace_docker.sh $(BINARY); \
 	else \
-		echo "Tracing binary: $(BINARY)"; \
-		if [ "$(UNAME_S)" = "Darwin" ]; then \
-			if [ "$(DOCKER)" != "1" ]; then \
-				echo "Error: On macOS, linux-user mode requires Docker."; \
-				echo "  Run: make trace BINARY=$(BINARY) DOCKER=1"; \
-				echo "  Or use: ./scripts/trace_docker.sh $(BINARY)"; \
-				exit 1; \
-			fi; \
-			./scripts/trace_docker.sh $(BINARY); \
-		else \
-			if [ ! -f "./qemu-build/bin/qemu-x86_64" ]; then \
-				echo "Error: qemu-x86_64 not found. Please rebuild QEMU with user-mode support:"; \
-				echo "  ./scripts/setup_qemu.sh"; \
-				exit 1; \
-			fi; \
-			./qemu-build/bin/qemu-x86_64 \
-				-plugin ./target/release/libkoradar_tracer.so \
-				$(BINARY); \
+		if [ ! -f "./qemu-build/bin/qemu-x86_64" ]; then \
+			echo "Error: qemu-x86_64 not found. Please rebuild QEMU with user-mode support:"; \
+			echo "  ./scripts/setup_qemu.sh"; \
+			exit 1; \
 		fi; \
+		./qemu-build/bin/qemu-x86_64 \
+			-plugin ./target/release/libkoradar_tracer.so \
+			$(BINARY); \
 	fi
 
 # Create a simple test binary (requires Docker or cross-compiler)
