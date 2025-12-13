@@ -156,11 +156,17 @@ koradar/
 
 ### Phase 3: AI-Powered Analysis
 - [x] Context-aware prompting engine (OpenAI Integration)
+- [ ] **AI Decompiler**: Generate C-like pseudo-code from assembly trace
 - [ ] Semantic lifting (auto-renaming)
 - [ ] Root cause analysis
 - [ ] Local/Cloud hybrid LLM support
 
-### Phase 4: Production UI & Ecosystem
+### Phase 4: Auto Pilot Agent
+- [ ] **Autonomous Vulnerability Scanning**: Agent proactively finds bugs
+- [ ] **Hypothesis & Verification Loop**: AI suggests and verifies exploits
+- [ ] **Language-Agnostic Analysis**: Support Go/Rust via AI-driven lifting
+
+### Phase 5: Production UI & Ecosystem
 - [ ] WebGL/WebGPU visualization
 - [ ] Data flow graph
 - [ ] WASM plugin system
