@@ -29,6 +29,18 @@ impl BinaryLoader {
                         }
                     }
                 }
+                
+                // Load symbols
+                for sym in elf.syms.iter() {
+                    // Filter for functions
+                    if sym.st_type() == elf::sym::STT_FUNC && sym.st_value != 0 {
+                         if let Some(name) = elf.strtab.get_at(sym.st_name) {
+                             // Use st_size if available, else 0
+                             db.add_symbol(sym.st_value, sym.st_size, name.to_string());
+                         }
+                    }
+                }
+
                 db.set_entry_point(elf.header.e_entry);
                 println!("Loaded ELF binary: {:?}", path);
             }
@@ -43,6 +55,16 @@ impl BinaryLoader {
                         db.load_static_memory(start, data);
                     }
                 }
+                
+                // Load PE exports as symbols
+                for export in pe.exports {
+                    if let Some(name) = export.name {
+                        let addr = pe.image_base as u64 + export.rva as u64;
+                         // PE exports usually don't have size info easily available here, use 0
+                         db.add_symbol(addr, 0, name.to_string());
+                    }
+                }
+
                 println!("Loaded PE binary: {:?}", path);
             }
             // Add Mach-O support if needed

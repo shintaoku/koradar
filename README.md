@@ -7,6 +7,8 @@ ko-radar.
 
 Koradar is a web-based binary analysis and debugging tool that provides **timeless debugging** capabilities—allowing you to navigate through execution history as if time were a variable. It combines the power of QEMU's dynamic binary instrumentation with a modern Rust backend and WebAssembly frontend.
 
+![Koradar UI](assets/top.png)
+
 ## Features
 
 ### Core Capabilities
@@ -15,6 +17,9 @@ Koradar is a web-based binary analysis and debugging tool that provides **timele
 - **Real-time Tracing**: Capture execution traces from QEMU using a TCG plugin, streaming data via Unix Domain Sockets for minimal overhead.
 - **Binary Loading**: Automatically parse and load ELF/PE binaries, displaying code sections and memory layout.
 - **Interactive UI**: Modern 3-pane interface (Registers, Execution Trace, Memory) built with Yew (Rust + WebAssembly).
+- **Control Flow Graph (CFG)**: Visualize execution flow with "From Main" filter to focus on relevant code.
+
+![Koradar CFG](assets/from_main_cfg.png)
 
 ### Architecture
 
@@ -143,13 +148,14 @@ koradar/
 - [x] Timeless navigation (slider, step buttons)
 
 ### Phase 2: Core Analysis & UX (Current)
-- [ ] Disassembly display (`capstone`)
-- [ ] Control Flow Graph (CFG) visualization
-- [ ] URL-based state sharing
-- [ ] Enhanced memory visualization (heat map)
+- [x] Disassembly display (`capstone`)
+- [x] Control Flow Graph (CFG) visualization
+- [x] URL-based state sharing
+- [x] Enhanced memory visualization
+- [x] Function search & filtering
 
 ### Phase 3: AI-Powered Analysis
-- [ ] Context-aware prompting engine
+- [x] Context-aware prompting engine (OpenAI Integration)
 - [ ] Semantic lifting (auto-renaming)
 - [ ] Root cause analysis
 - [ ] Local/Cloud hybrid LLM support

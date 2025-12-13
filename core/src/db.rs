@@ -69,6 +69,8 @@ pub struct TraceDB {
     entry_point: RwLock<Option<u64>>,
     // Execution bias (RunAddr - StaticAddr)
     bias: RwLock<i64>,
+    // Symbol map (StaticAddress -> (Size, SymbolName))
+    pub(crate) symbols: DashMap<u64, (u64, String)>,
 }
 
 impl TraceDB {
@@ -90,6 +92,7 @@ impl TraceDB {
             user_code_ranges: RwLock::new(Vec::new()),
             entry_point: RwLock::new(None),
             bias: RwLock::new(0),
+            symbols: DashMap::new(),
         }
     }
 
@@ -99,19 +102,6 @@ impl TraceDB {
     }
 
     pub fn set_bias(&self, bias: i64) {
-        // #region agent log
-        {
-            use std::fs::OpenOptions;
-            use std::io::Write;
-            let path = "/tmp/koradar_debug.log";
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                 let _ = writeln!(file, "{{\"id\":\"log_db_bias\",\"timestamp\":{},\"location\":\"db:set_bias\",\"message\":\"Set Bias\",\"data\":{{\"bias\":{}}},\"sessionId\":\"debug-session\"}}", 
-                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
-                    bias
-                 );
-            }
-        }
-        // #endregion
         *self.bias.write() = bias;
         println!("[DEBUG] TraceDB: Bias set to {:x} (RunAddr - StaticAddr)", bias);
     }
@@ -124,6 +114,40 @@ impl TraceDB {
         *self.entry_point.read()
     }
 
+    pub fn add_symbol(&self, start: u64, size: u64, name: String) {
+        self.symbols.insert(start, (size, name));
+    }
+
+    pub fn resolve_symbol(&self, address: u64) -> Option<(String, u64)> {
+        if let Some(entry) = self.symbols.get(&address) {
+            return Some((entry.1.clone(), 0));
+        }
+        None
+    }
+    
+    // Better version that finds containing symbol
+    pub fn find_symbol(&self, address: u64) -> Option<(String, u64)> {
+        // Iterate all symbols to find one that contains address
+        for r in self.symbols.iter() {
+            let start = *r.key();
+            let (size, ref name) = *r.value();
+            if address >= start && address < start + size {
+                return Some((name.clone(), address - start));
+            }
+        }
+        None
+    }
+
+    pub fn find_symbol_by_name(&self, target_name: &str) -> Option<u64> {
+        for r in self.symbols.iter() {
+            let (size, ref name) = *r.value();
+            if name == target_name {
+                return Some(*r.key());
+            }
+        }
+        None
+    }
+
     pub fn load_static_memory(&self, start_addr: Address, data: &[u8]) {
         for (i, &byte) in data.iter().enumerate() {
             let addr = start_addr + i as u64;
@@ -132,20 +156,6 @@ impl TraceDB {
     }
 
     pub fn register_code_range(&self, start: u64, size: u64) {
-        // #region agent log
-        {
-            use std::fs::OpenOptions;
-            use std::io::Write;
-            let path = "/tmp/koradar_debug.log";
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                 let _ = writeln!(file, "{{\"id\":\"log_db_range\",\"timestamp\":{},\"location\":\"db:register_code_range\",\"message\":\"Register Range\",\"data\":{{\"start\":{}, \"end\":{}}},\"sessionId\":\"debug-session\"}}", 
-                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
-                    start, start + size
-                 );
-            }
-        }
-        // #endregion
-
         println!(
             "[DEBUG] register_code_range: {:x} - {:x}",
             start,
@@ -318,24 +328,12 @@ impl TraceDB {
     }
 
     pub fn get_trace_log(&self, start: Clnum, count: u32, only_user_code: bool) -> Vec<TraceEntry> {
-        // println!(
-        //     "[DEBUG] get_trace_log start={} count={} only_user_code={}",
-        //     start, count, only_user_code
-        // );
-        
-        // Debug: Dump user code ranges if only_user_code is true
-        // if only_user_code {
-        //     let ranges = self.user_code_ranges.read();
-        //     println!("[DEBUG] Current user_code_ranges: {:?}", *ranges);
-        // }
-
         let changes = self.changes.read();
         let mut entries = Vec::new();
 
         let mut c = start;
         let mut collected = 0;
         let max_clnum = changes.last().map(|c| c.clnum).unwrap_or(0);
-        // println!("[DEBUG] max_clnum={}", max_clnum);
 
         // Safety break
         while collected < count && c <= max_clnum {
@@ -430,7 +428,6 @@ impl TraceDB {
                 break; // Prevent infinite loop if no user code found
             }
         }
-        // println!("[DEBUG] returning {} entries", entries.len());
         entries
     }
 }

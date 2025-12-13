@@ -38,6 +38,8 @@ pub struct TraceEntry {
 pub enum ClientMessage {
     QueryState {
         clnum: u32,
+        #[serde(default)]
+        memory_addr: Option<u64>,
     },
     GetTraceLog {
         start: u32,
@@ -54,6 +56,11 @@ pub enum ClientMessage {
     GetCFG {
         #[serde(default)]
         only_user_code: bool,
+        #[serde(default)]
+        start_from_main: bool,
+    },
+    AskAI {
+        clnum: u32,
     },
 }
 
@@ -77,5 +84,8 @@ pub enum ServerMessage {
     },
     CFG {
         graph: String,
+    },
+    AIResponse {
+        text: String,
     },
 }

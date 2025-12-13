@@ -15,6 +15,10 @@
             });
             window.renderMermaid = async function(elementId, graphDefinition) {
                 const element = document.getElementById(elementId);
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/cb3a262f-b30e-4ecf-92bb-6f5b9a3e4b48',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'index.html:renderMermaid',message:'Rendering Mermaid',data:{length: graphDefinition.length, snippet: graphDefinition.substring(0, 200)},timestamp:Date.now(),sessionId:'debug-session',runId:'debug-run',hypothesisId:'mermaid-client'})}).catch(()=>{});
+                // #endregion
+
                 if (element) {
                     element.removeAttribute('data-processed'); // Force re-render if needed (though we use render api)
                     try {
@@ -27,7 +31,7 @@
                         if (svgElement) {
                             svgElement.style.width = '100%';
                             svgElement.style.height = '100%';
-                            svgPanZoom(svgElement, {
+                            window.cfgPanZoom = svgPanZoom(svgElement, {
                                 zoomEnabled: true,
                                 controlIconsEnabled: true,
                                 fit: true,
@@ -40,6 +44,131 @@
                         console.error('Mermaid render error:', e);
                         element.innerHTML = '<pre style="color:red">Mermaid Error: ' + e.message + '</pre>';
                     }
+                }
+            };
+            
+            // Interaction callback from Mermaid
+            window.onBlockClick = function(addressHex) {
+                console.log("Block clicked:", addressHex);
+                const event = new CustomEvent('koradar-jump', { detail: addressHex });
+                window.dispatchEvent(event);
+            };
+
+            window.searchFunctionInCFG = function(funcName) {
+                if (!funcName) return;
+                
+                // Find element with text content containing funcName
+                // Mermaid subgraphs usually have ids like 'cluster_funcname' and labels inside
+                
+                // 1. Try to find the subgraph label
+                // Mermaid renders cluster labels as <span class="nodeLabel">Label</span> inside a foreignObject or similar
+                // Or <g class="cluster" id="cluster_funcname">
+                
+                // Let's assume we sanitized the name in Rust: safe_sym = sym_name.replace(|c: char| !c.is_alphanumeric(), "_");
+                const safeName = funcName.replace(/[^a-zA-Z0-9]/g, "_");
+                // Mermaid ID might be different depending on graph generation
+                // In our rust code: s.push_str(&format!("    subgraph cluster_{} [\"{}\"]\n", safe_sym, sym_name));
+                // So ID should be cluster_{safeName}
+                
+                // Mermaid often upper-cases or modifies IDs? No, usually keeps them if explicit.
+                // However, mermaid rendering engine might change it.
+                // Let's try searching by ID first.
+                
+                const svg = document.querySelector('#cfg-view svg');
+                if (!svg) return;
+                
+                // Note: svg-pan-zoom wraps content in a group class="svg-pan-zoom_viewport"
+                
+                // Try searching for the group with id
+                // It might be prefixed or just match
+                // We generated "subgraph cluster_main"
+                // Mermaid v10+ might render id="cluster_main"
+                
+                let target = svg.querySelector(`g[id*="cluster_${safeName}"]`);
+                
+                // Fallback: search text content
+                if (!target) {
+                    const textNodes = Array.from(svg.querySelectorAll('text, span.nodeLabel'));
+                    const found = textNodes.find(n => n.textContent.includes(funcName));
+                    if (found) {
+                        // Find closest parent g
+                        target = found.closest('g.cluster') || found.closest('g.node') || found;
+                    }
+                }
+
+                if (target) {
+                    console.log("Found function:", target);
+                    
+                    // Get bounding box
+                    const bbox = target.getBBox();
+                    
+                    // Access pan-zoom instance
+                    // We need to store it or access via library if possible
+                    // svg-pan-zoom stores instance on the element?
+                    // We can re-access it?
+                    // svgPanZoom(svgElement) returns the instance.
+                    
+                    // Let's store instance globally in renderMermaid
+                    if (window.cfgPanZoom) {
+                        // Transform bbox to center
+                        // We need to calculate new pan/zoom
+                        // Simplest: use zoomAtPoint or just center on it?
+                        
+                        // We need to convert SVG coordinates to viewport coordinates?
+                        // Or just use fit logic?
+                        
+                        // svg-pan-zoom doesn't have "zoom to element" built-in easily.
+                        // We can calculate pan.
+                        
+                        const sizes = window.cfgPanZoom.getSizes();
+                        const pan = window.cfgPanZoom.getPan();
+                        const zoom = window.cfgPanZoom.getZoom();
+                        
+                        // Target center in SVG units
+                        const cx = bbox.x + bbox.width / 2;
+                        const cy = bbox.y + bbox.height / 2;
+                        
+                        // We want this (cx, cy) to be at (sizes.width/2, sizes.height/2)
+                        // Current transformation: ScreenX = (SvgX * zoom) + panX
+                        // We want: sizes.width/2 = (cx * newZoom) + newPanX
+                        
+                        // Let's keep zoom same or zoom in slightly
+                        const newZoom = Math.max(zoom, 1.0);
+                        
+                        // newPanX = sizes.width/2 - cx * newZoom
+                        // newPanY = sizes.height/2 - cy * newZoom
+                        
+                        // However, we must account for the current CTM (Current Transformation Matrix) of the viewport group?
+                        // svg-pan-zoom modifies the transform attribute of the viewport group.
+                        // bbox is in the coordinate system of the viewport group (User Coordinate System).
+                        
+                        const newPanX = sizes.width / 2 - cx * newZoom;
+                        const newPanY = sizes.height / 2 - cy * newZoom;
+                        
+                        window.cfgPanZoom.zoom(newZoom);
+                        window.cfgPanZoom.pan({x: newPanX, y: newPanY});
+                        
+                        // Highlight effect?
+                        // target.style.stroke = "red";
+                        // target.style.strokeWidth = "5px";
+                        // setTimeout(() => { target.style.stroke = ""; target.style.strokeWidth = ""; }, 2000);
+                        
+                        // SVG elements styling depends on structure.
+                        // Usually clusters are <g><rect>...
+                        const rect = target.querySelector('rect') || target.querySelector('polygon');
+                        if (rect) {
+                             const originalStroke = rect.style.stroke;
+                             const originalWidth = rect.style.strokeWidth;
+                             rect.style.stroke = "red";
+                             rect.style.strokeWidth = "4px";
+                             setTimeout(() => { 
+                                 rect.style.stroke = originalStroke; 
+                                 rect.style.strokeWidth = originalWidth; 
+                             }, 3000);
+                        }
+                    }
+                } else {
+                    alert("Function not found in current graph: " + funcName);
                 }
             };
         </script>

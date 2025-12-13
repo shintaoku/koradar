@@ -2,14 +2,18 @@ use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::{futures::WebSocket, Message};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-use web_sys::{Event, HtmlInputElement};
+use web_sys::{Event, HtmlInputElement, InputEvent, KeyboardEvent};
 use yew::prelude::*;
 
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_name = renderMermaid)]
     fn render_mermaid(id: &str, text: &str) -> js_sys::Promise;
+
+    #[wasm_bindgen(js_name = searchFunctionInCFG)]
+    fn search_function_in_cfg(func_name: &str);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -26,6 +30,7 @@ struct TraceEntry {
 enum ClientMessage {
     QueryState {
         clnum: u32,
+        memory_addr: Option<u64>,
     },
     GetTraceLog {
         start: u32,
@@ -40,6 +45,10 @@ enum ClientMessage {
     },
     GetCFG {
         only_user_code: bool,
+        start_from_main: bool,
+    },
+    AskAI {
+        clnum: u32,
     },
 }
 
@@ -63,6 +72,9 @@ enum ServerMessage {
     CFG {
         graph: String,
     },
+    AIResponse {
+        text: String,
+    },
 }
 
 #[function_component(App)]
@@ -72,11 +84,18 @@ pub fn app() -> Html {
     let max_clnum = use_state(|| 0u32);
     let registers = use_state(|| vec![0u64; 16]);
     let memory = use_state(|| vec![0u8; 256]);
+    let memory_addr = use_state(|| 0u64);
     let current_disasm = use_state(|| String::from("Waiting for trace..."));
     let ws_sender = use_state(|| None::<futures::channel::mpsc::UnboundedSender<Message>>);
 
+    let ai_response = use_state(|| String::new());
+    let is_ai_loading = use_state(|| false);
+
     let view_mode = use_state(|| "timeline"); // "log" or "timeline" or "cfg"
     let only_user_code = use_state(|| false);
+    let start_from_main = use_state(|| false);
+    let search_term = use_state(|| String::new());
+    
     let timeline_entries = use_state(Vec::<TraceEntry>::new);
     let cfg_graph = use_state(|| String::new());
 
@@ -86,10 +105,13 @@ pub fn app() -> Html {
         let max_clnum = max_clnum.clone();
         let registers = registers.clone();
         let memory = memory.clone();
+        let memory_addr = memory_addr.clone();
         let current_disasm = current_disasm.clone();
         let ws_sender = ws_sender.clone();
         let timeline_entries = timeline_entries.clone();
         let cfg_graph = cfg_graph.clone();
+        let ai_response = ai_response.clone();
+        let is_ai_loading = is_ai_loading.clone();
 
         use_effect_with((), move |_| {
             let ws = WebSocket::open("ws://localhost:3000/ws").unwrap();
@@ -97,7 +119,45 @@ pub fn app() -> Html {
 
             // Create channel for sending messages
             let (tx, mut rx) = futures::channel::mpsc::unbounded();
-            ws_sender.set(Some(tx));
+            ws_sender.set(Some(tx.clone()));
+
+            // Setup global CFG click handler
+            let tx_clone = tx.clone();
+            let callback = Closure::wrap(Box::new(move |clnum_val: u32| {
+                // Send QueryState message
+                let msg = ClientMessage::QueryState {
+                    clnum: clnum_val,
+                    memory_addr: None,
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = tx_clone.unbounded_send(Message::Text(json));
+                }
+            }) as Box<dyn FnMut(u32)>);
+
+            let window = web_sys::window().unwrap();
+            js_sys::Reflect::set(
+                &window,
+                &JsValue::from_str("onCfgNodeClick"),
+                callback.as_ref().unchecked_ref(),
+            )
+            .unwrap();
+            callback.forget();
+
+            // Initial State from URL Hash
+            // Format: #clnum=123
+            if let Ok(hash) = window.location().hash() {
+                if hash.starts_with("#clnum=") {
+                    if let Ok(clnum) = hash[7..].parse::<u32>() {
+                        let msg = ClientMessage::QueryState {
+                            clnum,
+                            memory_addr: None,
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = tx.unbounded_send(Message::Text(json));
+                        }
+                    }
+                }
+            }
 
             // Spawn task to send messages
             spawn_local(async move {
@@ -116,13 +176,19 @@ pub fn app() -> Html {
                                     clnum,
                                     registers: regs,
                                     memory: mem,
+                                    memory_addr: mem_addr,
                                     disassembly,
                                     ..
                                 } => {
                                     current_clnum.set(clnum);
                                     registers.set(regs);
                                     memory.set(mem);
+                                    memory_addr.set(mem_addr);
                                     current_disasm.set(disassembly);
+
+                                    // Update URL hash
+                                    let window = web_sys::window().unwrap();
+                                    let _ = window.location().set_hash(&format!("clnum={}", clnum));
                                 }
                                 ServerMessage::MaxClnum { max } => {
                                     max_clnum.set(max);
@@ -150,6 +216,10 @@ pub fn app() -> Html {
                                         let _ = JsFuture::from(promise).await;
                                     });
                                 }
+                                ServerMessage::AIResponse { text } => {
+                                    ai_response.set(text);
+                                    is_ai_loading.set(false);
+                                }
                             }
                         } else {
                             // Fallback: treat as raw trace event
@@ -172,12 +242,38 @@ pub fn app() -> Html {
     let on_slider_change = {
         let ws_sender = ws_sender.clone();
         let current_clnum = current_clnum.clone();
+        let memory_addr = memory_addr.clone();
         Callback::from(move |e: Event| {
             if let Some(input) = e.target_dyn_into::<HtmlInputElement>() {
                 if let Ok(clnum) = input.value().parse::<u32>() {
                     current_clnum.set(clnum);
                     if let Some(sender) = &*ws_sender {
-                        let msg = ClientMessage::QueryState { clnum };
+                        let msg = ClientMessage::QueryState {
+                            clnum,
+                            memory_addr: Some(*memory_addr),
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = sender.unbounded_send(Message::Text(json));
+                        }
+                    }
+                }
+            }
+        })
+    };
+
+    let on_memory_addr_change = {
+        let ws_sender = ws_sender.clone();
+        let current_clnum = current_clnum.clone();
+        let memory_addr = memory_addr.clone();
+        Callback::from(move |e: Event| {
+            if let Some(input) = e.target_dyn_into::<HtmlInputElement>() {
+                if let Ok(addr) = u64::from_str_radix(&input.value(), 16) {
+                    memory_addr.set(addr);
+                    if let Some(sender) = &*ws_sender {
+                        let msg = ClientMessage::QueryState {
+                            clnum: *current_clnum,
+                            memory_addr: Some(addr),
+                        };
                         if let Ok(json) = serde_json::to_string(&msg) {
                             let _ = sender.unbounded_send(Message::Text(json));
                         }
@@ -219,7 +315,8 @@ pub fn app() -> Html {
         let view_mode = view_mode.clone();
         let ws_sender = ws_sender.clone();
         let only_user_code = *only_user_code;
-
+        let start_from_main = *start_from_main;
+        
         Callback::from(move |_: MouseEvent| {
             if *view_mode == "log" {
                 view_mode.set("timeline");
@@ -227,7 +324,7 @@ pub fn app() -> Html {
                 view_mode.set("cfg");
                 // Fetch CFG
                 if let Some(sender) = &*ws_sender {
-                    let msg = ClientMessage::GetCFG { only_user_code };
+                    let msg = ClientMessage::GetCFG { only_user_code, start_from_main };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = sender.unbounded_send(Message::Text(json));
                     }
@@ -249,20 +346,72 @@ pub fn app() -> Html {
         })
     };
 
+    let toggle_start_main = {
+        let start_from_main = start_from_main.clone();
+        Callback::from(move |e: Event| {
+            let target: Option<HtmlInputElement> = e.target_dyn_into();
+            if let Some(input) = target {
+                let val = input.checked();
+                start_from_main.set(val);
+            }
+        })
+    };
+    
+    let on_search_change = {
+        let search_term = search_term.clone();
+        Callback::from(move |e: InputEvent| {
+            if let Some(input) = e.target_dyn_into::<HtmlInputElement>() {
+                search_term.set(input.value());
+            }
+        })
+    };
+    
+    let on_search_submit = {
+        let search_term = search_term.clone();
+        Callback::from(move |e: KeyboardEvent| {
+            if e.key() == "Enter" {
+                let term = (*search_term).clone();
+                search_function_in_cfg(&term);
+            }
+        })
+    };
+
+    let on_ask_ai = {
+        let ws_sender = ws_sender.clone();
+        let current_clnum = current_clnum.clone();
+        let is_ai_loading = is_ai_loading.clone();
+        let ai_response = ai_response.clone();
+
+        Callback::from(move |_| {
+            is_ai_loading.set(true);
+            ai_response.set(String::new());
+            if let Some(sender) = &*ws_sender {
+                let msg = ClientMessage::AskAI {
+                    clnum: *current_clnum,
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = sender.unbounded_send(Message::Text(json));
+                }
+            }
+        })
+    };
+
     // Auto-refresh timeline when clnum, view_mode, or only_user_code changes
     {
         let ws_sender = ws_sender.clone();
         let current_clnum = current_clnum.clone();
         let view_mode = view_mode.clone();
         let only_user_code = only_user_code.clone();
+        let start_from_main = start_from_main.clone();
 
         use_effect_with(
             (
                 current_clnum.clone(),
                 view_mode.clone(),
                 only_user_code.clone(),
+                start_from_main.clone(),
             ),
-            move |(current_clnum, view_mode, only_user_code)| {
+            move |(current_clnum, view_mode, only_user_code, start_from_main)| {
                 if **view_mode == "timeline" {
                     let center = **current_clnum;
                     let start = center.saturating_sub(20);
@@ -281,6 +430,7 @@ pub fn app() -> Html {
                     if let Some(sender) = &*ws_sender {
                         let msg = ClientMessage::GetCFG {
                             only_user_code: **only_user_code,
+                            start_from_main: **start_from_main,
                         };
                         if let Ok(json) = serde_json::to_string(&msg) {
                             let _ = sender.unbounded_send(Message::Text(json));
@@ -328,6 +478,9 @@ pub fn app() -> Html {
                 ::-webkit-scrollbar-track { background: #1e1e1e; }
                 ::-webkit-scrollbar-thumb { background: #444; }
                 ::-webkit-scrollbar-thumb:hover { background: #555; }
+                
+                .ai-panel { margin: 10px; padding: 10px; background: #252526; border: 1px solid #444; border-radius: 4px; }
+                .ai-panel pre { white-space: pre-wrap; margin: 0; font-family: monospace; font-size: 12px; color: #9cdcfe; }
                 " }
             </style>
 
@@ -363,15 +516,40 @@ pub fn app() -> Html {
                              {
                                 if *view_mode == "timeline" || *view_mode == "cfg" {
                                     html! {
-                                        <label style="font-size: 10px; cursor: pointer;">
-                                            <input type="checkbox" checked={*only_user_code} onchange={toggle_user_code} />
-                                            {" User Code Only"}
-                                        </label>
+                                        <>
+                                            <label style="font-size: 10px; cursor: pointer; margin-right: 5px;">
+                                                <input type="checkbox" checked={*only_user_code} onchange={toggle_user_code} />
+                                                {" User Code"}
+                                            </label>
+                                            {
+                                                if *view_mode == "cfg" {
+                                                    html! {
+                                                        <>
+                                                            <label style="font-size: 10px; cursor: pointer; margin-right: 5px;">
+                                                                <input type="checkbox" checked={*start_from_main} onchange={toggle_start_main} />
+                                                                {" From Main"}
+                                                            </label>
+                                                            <input 
+                                                                type="text" 
+                                                                placeholder="Search Func..." 
+                                                                value={(*search_term).clone()}
+                                                                oninput={on_search_change}
+                                                                onkeydown={on_search_submit}
+                                                                style="font-size: 10px; padding: 2px; width: 100px; background: #333; color: white; border: 1px solid #555;"
+                                                            />
+                                                        </>
+                                                    }
+                                                } else { html! {} }
+                                            }
+                                        </>
                                     }
                                 } else {
                                     html! {}
                                 }
                              }
+                             <button onclick={on_ask_ai} style="font-size: 10px; margin-left: 5px; background: #0e639c; color: white; border: none; cursor: pointer;">
+                                { if *is_ai_loading { "Thinking..." } else { "Ask AI ✨" } }
+                             </button>
                         </div>
                     </div>
 
@@ -398,6 +576,17 @@ pub fn app() -> Html {
                     </div>
 
                     <div class="trace-content">
+                        {
+                            if !ai_response.is_empty() {
+                                html! {
+                                    <div class="ai-panel">
+                                        <div class="header" style="color: #ce9178;">{ "AI Analysis" }</div>
+                                        <pre>{ &*ai_response }</pre>
+                                    </div>
+                                }
+                            } else { html! {} }
+                        }
+
                         {
                             if *view_mode == "log" {
                                 html! {
@@ -432,10 +621,11 @@ pub fn app() -> Html {
                                                     let on_click = {
                                                         let ws_sender = ws_sender.clone();
                                                         let current_clnum = current_clnum.clone();
+                                                        let memory_addr = memory_addr.clone();
                                                         Callback::from(move |_| {
                                                             current_clnum.set(clnum);
                                                             if let Some(sender) = &*ws_sender {
-                                                                let msg = ClientMessage::QueryState { clnum };
+                                                                let msg = ClientMessage::QueryState { clnum, memory_addr: Some(*memory_addr) };
                                                                 if let Ok(json) = serde_json::to_string(&msg) {
                                                                     let _ = sender.unbounded_send(Message::Text(json));
                                                                 }
@@ -478,18 +668,29 @@ pub fn app() -> Html {
 
                 // Memory Panel
                 <div class="panel mem">
-                    <div class="header">{ "MEMORY" }</div>
-                    <div style="font-size: 11px; line-height: 1.4;">
+                    <div class="header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <span>{ "MEMORY" }</span>
+                        <input
+                            type="text"
+                            placeholder="Addr (Hex)"
+                            onchange={on_memory_addr_change}
+                            style="width: 100px; font-size: 11px; background: #333; color: #d4d4d4; border: 1px solid #555; padding: 2px;"
+                            value={format!("{:x}", *memory_addr)}
+                        />
+                    </div>
+                    <div style="font-size: 11px; line-height: 1.4; font-family: monospace;">
                         {
                             for memory.chunks(16).enumerate().map(|(i, chunk)| {
-                                let addr = i * 16;
+                                let addr = *memory_addr + (i * 16) as u64;
                                 let hex: String = chunk.iter().map(|b| format!("{:02x} ", b)).collect();
                                 let ascii: String = chunk.iter().map(|&b| {
                                     if b >= 32 && b < 127 { b as char } else { '.' }
                                 }).collect();
                                 html! {
-                                    <div style="margin-bottom: 2px;">
-                                        { format!("{:08x}: {} |{}|", addr, hex, ascii) }
+                                    <div style="margin-bottom: 2px; display: flex;">
+                                        <span style="color: #ce9178; width: 70px; flex-shrink: 0;">{ format!("{:08x}:", addr) }</span>
+                                        <span style="color: #d4d4d4; margin-right: 10px; width: 230px; flex-shrink: 0;">{ hex }</span>
+                                        <span style="color: #6a9955;">{ format!("|{}|", ascii) }</span>
                                     </div>
                                 }
                             })

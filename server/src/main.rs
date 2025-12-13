@@ -20,6 +20,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast;
 use tower_http::services::ServeDir;
 
+mod ai;
+
 struct AppState {
     db: Arc<TraceDB>,
     tx: broadcast::Sender<String>,
@@ -28,6 +30,9 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // Load .env
+    dotenv::dotenv().ok();
+
     println!("Koradar Server Starting...");
 
     let db = Arc::new(TraceDB::new(16));
@@ -99,8 +104,6 @@ async fn main() {
                                         disasm,
                                     } => {
                                         if current_clnum < 10 {
-                                            // println!("[DEBUG] Server received InsnExec: pc={:x}, bytes={:?}, disasm={:?}", pc, bytes, disasm);
-                                            
                                             // Auto-detect Bias on first instruction (or first few)
                                             if current_clnum == 1 {
                                                 if let Some(ep) = ipc_db.get_entry_point() {
@@ -185,21 +188,20 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        // Debug log: received message
-                        // println!("Received: {}", text); // Too verbose for all messages
-
                         match serde_json::from_str::<ClientMessage>(&text) {
                             Ok(client_msg) => {
                                 match client_msg {
-                                    ClientMessage::QueryState { clnum } => {
+                                    ClientMessage::QueryState { clnum, memory_addr } => {
                                         let regs = db.get_registers_at(clnum);
-                                        let mem = db.get_memory_at(clnum, 0, 256);
+                                        // Default to 0 or use provided address
+                                        let mem_start = memory_addr.unwrap_or(0);
+                                        let mem = db.get_memory_at(clnum, mem_start, 256);
                                         let disasm = db.get_disassembly_at(clnum);
                                         let response = ServerMessage::StateUpdate {
                                             clnum,
                                             registers: regs,
                                             memory: mem,
-                                            memory_addr: 0,
+                                            memory_addr: mem_start,
                                             disassembly: disasm,
                                         };
                                         if let Ok(json) = serde_json::to_string(&response) {
@@ -207,9 +209,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                         }
                                     }
                                     ClientMessage::GetTraceLog { start, count, only_user_code } => {
-                                        // println!("[DEBUG] GetTraceLog: start={}, count={}, only_user_code={}", start, count, only_user_code);
                                         let entries = db.get_trace_log(start, count, only_user_code);
-                                        // println!("[DEBUG] GetTraceLog: returning {} entries", entries.len());
                                         let response = ServerMessage::TraceLog { entries };
                                         if let Ok(json) = serde_json::to_string(&response) {
                                             let _ = socket.send(Message::Text(json)).await;
@@ -245,14 +245,65 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                             let _ = socket.send(Message::Text(json)).await;
                                         }
                                     }
-                                    ClientMessage::GetCFG { only_user_code } => {
-                                        // TODO: Run in blocking task if heavy
-                                        let cfg = db.analyze_cfg(only_user_code);
+                                    ClientMessage::GetCFG { only_user_code, start_from_main } => {
+                                        let cfg = db.analyze_cfg(only_user_code, start_from_main);
                                         let mermaid = cfg.to_mermaid();
                                         println!("[INFO] Generated CFG size: {} bytes", mermaid.len());
+                                        
+                                        // #region agent log
+                                        {
+                                            use std::fs::OpenOptions;
+                                            use std::io::Write;
+                                            let path = "/Users/shinta/git/github.com/geohot/qira/.cursor/debug.log";
+                                            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                                                let _ = writeln!(file, "{{\"id\":\"log_cfg_gen\",\"timestamp\":{},\"location\":\"server/main.rs:GetCFG\",\"message\":\"Generated CFG\",\"data\":{{\"size\":{}, \"head\":\"{}\"}},\"sessionId\":\"debug-session\",\"runId\":\"debug-run\",\"hypothesisId\":\"mermaid-syntax\"}}", 
+                                                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+                                                    mermaid.len(),
+                                                    mermaid.chars().take(500).collect::<String>().replace("\"", "'").replace("\n", "\\n")
+                                                );
+                                            }
+                                        }
+                                        // #endregion
+
                                         let response = ServerMessage::CFG { graph: mermaid };
                                         if let Ok(json) = serde_json::to_string(&response) {
                                             let _ = socket.send(Message::Text(json)).await;
+                                        }
+                                    }
+                                    ClientMessage::AskAI { clnum } => {
+                                        // Build context
+                                        let disasm = db.get_disassembly_at(clnum);
+                                        let regs = db.get_registers_at(clnum);
+                                        // Simple register dump
+                                        let regs_str = regs.iter().enumerate().map(|(i, v)| format!("R{}: {:x}", i, v)).collect::<Vec<_>>().join(", ");
+                                        
+                                        // Get surrounding code (5 before, 5 after)
+                                        // We need addresses... just get 10 disassembly lines
+                                        // This is a bit inefficient without `get_trace_log` helper but acceptable
+                                        let log = db.get_trace_log(clnum.saturating_sub(5), 10, true);
+                                        let code_context = log.iter().map(|e| format!("{:x}: {}", e.address, e.disassembly)).collect::<Vec<_>>().join("\n");
+
+                                        let context_str = format!("Instruction: {}\nRegisters: {}\n\nSurrounding Code:\n{}", disasm, regs_str, code_context);
+                                        
+                                        // Call AI (in background task to avoid blocking)
+                                        // Ideally we should use a separate tokio task
+                                        // For now, simple spawn
+                                        // socket is consumed... clone sender?
+                                        // socket is mutable, can't clone.
+                                        // We need to send response back to *this* socket.
+                                        // But `ask_ai` is async. We can await it here.
+                                        // `handle_socket` is async.
+                                        
+                                        // Send "Thinking..." message?
+                                        let _ = socket.send(Message::Text(serde_json::to_string(&ServerMessage::AIResponse { text: "Thinking...".to_string() }).unwrap())).await;
+
+                                        match ai::ask_ai(context_str).await {
+                                            Ok(ans) => {
+                                                let _ = socket.send(Message::Text(serde_json::to_string(&ServerMessage::AIResponse { text: ans }).unwrap())).await;
+                                            }
+                                            Err(e) => {
+                                                let _ = socket.send(Message::Text(serde_json::to_string(&ServerMessage::AIResponse { text: format!("Error: {}", e) }).unwrap())).await;
+                                            }
                                         }
                                     }
                                 }
