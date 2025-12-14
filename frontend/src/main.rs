@@ -47,8 +47,15 @@ enum ClientMessage {
         only_user_code: bool,
         start_from_main: bool,
     },
+    GetSlice {
+        clnum: u32,
+        target: String,
+    },
     AskAI {
         clnum: u32,
+    },
+    GetMemoryWrites {
+        address: u64,
     },
 }
 
@@ -75,6 +82,13 @@ enum ServerMessage {
     AIResponse {
         text: String,
     },
+    MemoryWrites {
+        address: u64,
+        writes: Vec<u32>,
+    },
+    Slice {
+        entries: Vec<TraceEntry>,
+    },
 }
 
 #[function_component(App)]
@@ -85,6 +99,7 @@ pub fn app() -> Html {
     let registers = use_state(|| vec![0u64; 16]);
     let memory = use_state(|| vec![0u8; 256]);
     let memory_addr = use_state(|| 0u64);
+    let memory_writes = use_state(Vec::<u32>::new);
     let current_disasm = use_state(|| String::from("Waiting for trace..."));
     let ws_sender = use_state(|| None::<futures::channel::mpsc::UnboundedSender<Message>>);
 
@@ -95,6 +110,7 @@ pub fn app() -> Html {
     let only_user_code = use_state(|| false);
     let start_from_main = use_state(|| false);
     let search_term = use_state(|| String::new());
+    let slice_target = use_state(|| String::new());
     
     let timeline_entries = use_state(Vec::<TraceEntry>::new);
     let cfg_graph = use_state(|| String::new());
@@ -106,12 +122,15 @@ pub fn app() -> Html {
         let registers = registers.clone();
         let memory = memory.clone();
         let memory_addr = memory_addr.clone();
+        let memory_writes = memory_writes.clone();
         let current_disasm = current_disasm.clone();
         let ws_sender = ws_sender.clone();
         let timeline_entries = timeline_entries.clone();
         let cfg_graph = cfg_graph.clone();
         let ai_response = ai_response.clone();
         let is_ai_loading = is_ai_loading.clone();
+        let view_mode = view_mode.clone();
+        let slice_target = slice_target.clone();
 
         use_effect_with((), move |_| {
             let ws = WebSocket::open("ws://localhost:3000/ws").unwrap();
@@ -180,6 +199,14 @@ pub fn app() -> Html {
                                     disassembly,
                                     ..
                                 } => {
+                                    // #region agent log
+                                    {
+                                        web_sys::console::log_1(&format!("StateUpdate: clnum={}, regs_len={}", clnum, regs.len()).into());
+                                        if !regs.is_empty() {
+                                            web_sys::console::log_1(&format!("Reg0 (RAX?): {:x}", regs[0]).into());
+                                        }
+                                    }
+                                    // #endregion
                                     current_clnum.set(clnum);
                                     registers.set(regs);
                                     memory.set(mem);
@@ -219,6 +246,13 @@ pub fn app() -> Html {
                                 ServerMessage::AIResponse { text } => {
                                     ai_response.set(text);
                                     is_ai_loading.set(false);
+                                }
+                                ServerMessage::MemoryWrites { address: _, writes } => {
+                                    memory_writes.set(writes);
+                                }
+                                ServerMessage::Slice { entries } => {
+                                    timeline_entries.set(entries);
+                                    view_mode.set("slice");
                                 }
                             }
                         } else {
@@ -320,7 +354,7 @@ pub fn app() -> Html {
         Callback::from(move |_: MouseEvent| {
             if *view_mode == "log" {
                 view_mode.set("timeline");
-            } else if *view_mode == "timeline" {
+            } else if *view_mode == "timeline" || *view_mode == "slice" {
                 view_mode.set("cfg");
                 // Fetch CFG
                 if let Some(sender) = &*ws_sender {
@@ -388,6 +422,47 @@ pub fn app() -> Html {
             if let Some(sender) = &*ws_sender {
                 let msg = ClientMessage::AskAI {
                     clnum: *current_clnum,
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = sender.unbounded_send(Message::Text(json));
+                }
+            }
+        })
+    };
+
+    let on_get_writes = {
+        let ws_sender = ws_sender.clone();
+        let memory_addr = memory_addr.clone();
+        Callback::from(move |_| {
+             if let Some(sender) = &*ws_sender {
+                 let msg = ClientMessage::GetMemoryWrites {
+                     address: *memory_addr,
+                 };
+                 if let Ok(json) = serde_json::to_string(&msg) {
+                     let _ = sender.unbounded_send(Message::Text(json));
+                 }
+             }
+        })
+    };
+
+    let on_slice_target_change = {
+        let slice_target = slice_target.clone();
+        Callback::from(move |e: InputEvent| {
+            if let Some(input) = e.target_dyn_into::<HtmlInputElement>() {
+                slice_target.set(input.value());
+            }
+        })
+    };
+
+    let on_slice = {
+        let ws_sender = ws_sender.clone();
+        let current_clnum = current_clnum.clone();
+        let slice_target = slice_target.clone();
+        Callback::from(move |_| {
+            if let Some(sender) = &*ws_sender {
+                let msg = ClientMessage::GetSlice {
+                    clnum: *current_clnum,
+                    target: (*slice_target).clone(),
                 };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = sender.unbounded_send(Message::Text(json));
@@ -509,12 +584,13 @@ pub fn app() -> Html {
                                 { match *view_mode {
                                     "log" => "Switch to Timeline",
                                     "timeline" => "Switch to CFG",
+                                    "slice" => "Switch to CFG",
                                     "cfg" => "Switch to Raw Log",
                                     _ => "Unknown"
                                 } }
                              </button>
                              {
-                                if *view_mode == "timeline" || *view_mode == "cfg" {
+                                if *view_mode == "timeline" || *view_mode == "cfg" || *view_mode == "slice" {
                                     html! {
                                         <>
                                             <label style="font-size: 10px; cursor: pointer; margin-right: 5px;">
@@ -550,6 +626,16 @@ pub fn app() -> Html {
                              <button onclick={on_ask_ai} style="font-size: 10px; margin-left: 5px; background: #0e639c; color: white; border: none; cursor: pointer;">
                                 { if *is_ai_loading { "Thinking..." } else { "Ask AI ✨" } }
                              </button>
+                             <div style="display: flex; gap: 5px; margin-left: 10px; align-items: center;">
+                                 <input
+                                     type="text"
+                                     placeholder="Slice (rax..)"
+                                     value={(*slice_target).clone()}
+                                     oninput={on_slice_target_change}
+                                     style="font-size: 10px; width: 80px; background: #333; color: white; border: 1px solid #555; padding: 2px;"
+                                 />
+                                 <button onclick={on_slice} style="font-size: 10px; cursor: pointer; padding: 2px;">{ "Slice" }</button>
+                             </div>
                         </div>
                     </div>
 
@@ -603,7 +689,11 @@ pub fn app() -> Html {
                                 }
                             } else {
                                 html! {
-                                    <table class="timeline-table">
+                                    <>
+                                        { if *view_mode == "slice" {
+                                            html! { <div style="background: #333; color: #fff; padding: 2px; font-size: 10px; border-bottom: 1px solid #555;">{ format!("Slice Results for '{}'", *slice_target) }</div> }
+                                        } else { html! {} } }
+                                        <table class="timeline-table">
                                         <thead>
                                             <tr>
                                                 <th>{ "Time" }</th>
@@ -660,6 +750,7 @@ pub fn app() -> Html {
                                             }
                                         </tbody>
                                     </table>
+                                    </>
                                 }
                             }
                         }
@@ -670,13 +761,16 @@ pub fn app() -> Html {
                 <div class="panel mem">
                     <div class="header" style="display: flex; justify-content: space-between; align-items: center;">
                         <span>{ "MEMORY" }</span>
-                        <input
-                            type="text"
-                            placeholder="Addr (Hex)"
-                            onchange={on_memory_addr_change}
-                            style="width: 100px; font-size: 11px; background: #333; color: #d4d4d4; border: 1px solid #555; padding: 2px;"
-                            value={format!("{:x}", *memory_addr)}
-                        />
+                        <div style="display: flex; gap: 5px;">
+                            <input
+                                type="text"
+                                placeholder="Addr (Hex)"
+                                onchange={on_memory_addr_change}
+                                style="width: 80px; font-size: 11px; background: #333; color: #d4d4d4; border: 1px solid #555; padding: 2px;"
+                                value={format!("{:x}", *memory_addr)}
+                            />
+                            <button onclick={on_get_writes} style="font-size: 10px; cursor: pointer; padding: 2px;">{ "Writes" }</button>
+                        </div>
                     </div>
                     <div style="font-size: 11px; line-height: 1.4; font-family: monospace;">
                         {
@@ -695,6 +789,43 @@ pub fn app() -> Html {
                                 }
                             })
                         }
+                    </div>
+                    <div style="margin-top: 10px; border-top: 1px solid #444; padding-top: 5px;">
+                        <div style="font-weight: bold; margin-bottom: 5px; font-size: 11px;">{ "Write History" }</div>
+                         {
+                             if memory_writes.is_empty() {
+                                 html! { <div style="color: #666; font-size: 10px;">{ "No writes found" }</div> }
+                             } else {
+                                 html! {
+                                     <div style="display: flex; flex-wrap: wrap; gap: 5px; font-size: 10px;">
+                                         {
+                                             for memory_writes.iter().map(|&w| {
+                                                 let on_click = {
+                                                     let ws_sender = ws_sender.clone();
+                                                     let current_clnum = current_clnum.clone();
+                                                     let memory_addr = memory_addr.clone();
+                                                     Callback::from(move |_| {
+                                                         current_clnum.set(w);
+                                                         if let Some(sender) = &*ws_sender {
+                                                             let msg = ClientMessage::QueryState {
+                                                                 clnum: w,
+                                                                 memory_addr: Some(*memory_addr),
+                                                             };
+                                                             if let Ok(json) = serde_json::to_string(&msg) {
+                                                                 let _ = sender.unbounded_send(Message::Text(json));
+                                                             }
+                                                         }
+                                                     })
+                                                 };
+                                                 html! {
+                                                     <span onclick={on_click} style="cursor: pointer; color: #569cd6; text-decoration: underline;">{ w }</span>
+                                                 }
+                                             })
+                                         }
+                                     </div>
+                                 }
+                             }
+                         }
                     </div>
                 </div>
             </div>

@@ -102,22 +102,66 @@ async fn main() {
                                         pc,
                                         bytes,
                                         disasm,
+                                        regs,
                                     } => {
-                                        if current_clnum < 10 {
-                                            // Auto-detect Bias on first instruction (or first few)
-                                            if current_clnum == 1 {
-                                                if let Some(ep) = ipc_db.get_entry_point() {
-                                                    let bias = (*pc as i64) - (ep as i64);
-                                                    if bias != 0 {
-                                                        println!("[INFO] Detected PIE/ASLR bias: {:x} (PC={:x}, Entry={:x})", bias, pc, ep);
-                                                        ipc_db.set_bias(bias);
-                                                    }
+                                        // Debug log for instruction addresses
+                                        // #region agent log
+                                        if current_clnum < 5 {
+                                            use std::fs::OpenOptions;
+                                            use std::io::Write;
+                                            let path = "/Users/shinta/git/github.com/geohot/qira/.cursor/debug.log";
+                                            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                                                let _ = writeln!(file, "{{\"id\":\"log_insn_regs\",\"timestamp\":{},\"location\":\"server/main.rs:InsnExec\",\"message\":\"Received registers\",\"data\":{{\"clnum\":{}, \"pc\":{}, \"regs_len\":{}, \"regs_sample\":{:?}}},\"sessionId\":\"debug-session\",\"runId\":\"debug-run\",\"hypothesisId\":\"regs-zero\"}}", 
+                                                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+                                                    current_clnum, pc, regs.len(), regs.iter().take(4).collect::<Vec<_>>()
+                                                );
+                                            }
+                                        }
+                                        // #endregion
+                                        /*
+                                        if current_clnum < 200 {
+                                            println!("[DEBUG] Insn: {:x}", pc);
+                                        }
+                                        */
+
+                                        // Better heuristic: scan all instructions, not just first 10
+                                        if let Some(ep) = ipc_db.get_entry_point() {
+                                            // Check if this PC matches the entry point pattern
+                                            // If -no-pie, pc should equal ep.
+                                            // If PIE, pc = ep + bias.
+                                            // Since we don't know bias, we check alignment.
+                                            // 0x...1234 (pc) vs 0x...1234 (ep)
+                                            if (pc & 0xFFF) == (ep & 0xFFF) {
+                                                let bias = (*pc as i64) - (ep as i64);
+                                                // Only set if we haven't found a bias or it's different/better
+                                                // (e.g. bias=0 is preferred if -no-pie)
+                                                let current_bias = ipc_db.get_bias();
+                                                if current_bias == 0 && bias != 0 {
+                                                     // If we thought bias was 0 but found a PIE match, maybe update?
+                                                     // But if -no-pie, bias IS 0.
+                                                     // Let's print for debug.
+                                                     println!("[INFO] Candidate bias: {:x} at clnum {}", bias, current_clnum);
+                                                     // If bias is huge (like 0x7fff...) it might be loader matching coincidently?
+                                                     // Loader addresses are usually high. Main binary usually 0x55...
+                                                     // If pc is 0x40xxxx, it's definitely main binary.
+                                                     
+                                                     // Prioritize low-memory addresses for main binary if possible
+                                                     if *pc < 0x7000_0000_0000 {
+                                                         ipc_db.set_bias(bias);
+                                                     }
+                                                } else if bias == 0 && current_bias != 0 {
+                                                    // Found exact match, prefer this!
+                                                    ipc_db.set_bias(0);
                                                 }
                                             }
                                         }
                                         ipc_db.add_instruction(current_clnum, bytes.clone());
                                         if let Some(d) = disasm {
                                             ipc_db.add_instruction_disasm(current_clnum, d.clone());
+                                        }
+                                        
+                                        if !regs.is_empty() {
+                                            ipc_db.update_registers(current_clnum, regs);
                                         }
 
                                         ipc_db.add_change(Change {
@@ -210,6 +254,19 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     }
                                     ClientMessage::GetTraceLog { start, count, only_user_code } => {
                                         let entries = db.get_trace_log(start, count, only_user_code);
+                                        // #region agent log
+                                        {
+                                            use std::fs::OpenOptions;
+                                            use std::io::Write;
+                                            let path = "/Users/shinta/git/github.com/geohot/qira/.cursor/debug.log";
+                                            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                                                let _ = writeln!(file, "{{\"id\":\"log_get_trace\",\"timestamp\":{},\"location\":\"server/main.rs:GetTraceLog\",\"message\":\"GetTraceLog query\",\"data\":{{\"start\":{}, \"count\":{}, \"only_user_code\":{}, \"result_count\":{}}},\"sessionId\":\"debug-session\",\"runId\":\"debug-run\",\"hypothesisId\":\"user-code-filter\"}}", 
+                                                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+                                                    start, count, only_user_code, entries.len()
+                                                );
+                                            }
+                                        }
+                                        // #endregion
                                         let response = ServerMessage::TraceLog { entries };
                                         if let Ok(json) = serde_json::to_string(&response) {
                                             let _ = socket.send(Message::Text(json)).await;
@@ -304,6 +361,28 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                             Err(e) => {
                                                 let _ = socket.send(Message::Text(serde_json::to_string(&ServerMessage::AIResponse { text: format!("Error: {}", e) }).unwrap())).await;
                                             }
+                                        }
+                                    }
+                                    ClientMessage::GetMemoryWrites { address } => {
+                                        let writes = db.get_memory_writes(address);
+                                        let response = ServerMessage::MemoryWrites { address, writes };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = socket.send(Message::Text(json)).await;
+                                        }
+                                    }
+                                    ClientMessage::GetSlice { clnum, target } => {
+                                        let clnums = db.get_slice(clnum, target);
+                                        let mut entries = Vec::new();
+                                        for c in clnums {
+                                            // Inefficient but works for now
+                                            // get_trace_log returns Vec<TraceEntry>
+                                            if let Some(e) = db.get_trace_log(c, 1, false).first() {
+                                                entries.push(e.clone());
+                                            }
+                                        }
+                                        let response = ServerMessage::Slice { entries };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = socket.send(Message::Text(json)).await;
                                         }
                                     }
                                 }

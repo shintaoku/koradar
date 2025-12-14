@@ -53,7 +53,7 @@ echo "Running QEMU with tracer in Docker (x86_64)..."
 echo "Note: Make sure the server is running (make run) in another terminal"
 echo "      Server should be listening on 0.0.0.0:3001"
 echo ""
-docker run --rm -it --platform linux/amd64 \
+docker run --rm -i --platform linux/amd64 \
     -v "$(pwd)/qemu-build-docker/bin:/qemu-bin:ro" \
     -v "$(pwd)/target/x86_64-unknown-linux-gnu/release:/plugins:ro" \
     -v "$(realpath $BINARY):/binary:ro" \

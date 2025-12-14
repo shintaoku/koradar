@@ -154,12 +154,21 @@ koradar/
 - [x] Enhanced memory visualization
 - [x] Function search & filtering
 
+### Phase 2.5: Data Fidelity
+- [ ] **Register Value Capture**: Read actual x86_64 registers (RAX..R15)
+- [ ] **Memory Value Capture**: Capture written/read values for precise state reconstruction
+
 ### Phase 3: AI-Powered Analysis
 - [x] Context-aware prompting engine (OpenAI Integration)
 - [ ] **AI Decompiler**: Generate C-like pseudo-code from assembly trace
 - [ ] Semantic lifting (auto-renaming)
 - [ ] Root cause analysis
 - [ ] Local/Cloud hybrid LLM support
+
+### Phase 3.5: Deep Analysis
+- [ ] **Memory Access History**: Reverse lookup for memory writes
+- [ ] **Stack Variable Recovery**: Resolve `[rbp-offset]` to `var_8`
+- [ ] **Program Slicing**: Backward slicing for dependency tracking
 
 ### Phase 4: Auto Pilot Agent
 - [ ] **Autonomous Vulnerability Scanning**: Agent proactively finds bugs

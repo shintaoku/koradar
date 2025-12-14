@@ -11,6 +11,8 @@ pub enum TraceEvent {
         bytes: Vec<u8>,
         #[serde(default)]
         disasm: Option<String>,
+        #[serde(default)]
+        regs: Vec<u64>,
     }, // Simplified for now
     MemAccess {
         vcpu_index: u32,
@@ -62,6 +64,13 @@ pub enum ClientMessage {
     AskAI {
         clnum: u32,
     },
+    GetMemoryWrites {
+        address: u64,
+    },
+    GetSlice {
+        clnum: u32,
+        target: String,
+    },
 }
 
 // Server -> Client messages (beyond raw TraceEvent)
@@ -87,5 +96,12 @@ pub enum ServerMessage {
     },
     AIResponse {
         text: String,
+    },
+    MemoryWrites {
+        address: u64,
+        writes: Vec<u32>,
+    },
+    Slice {
+        entries: Vec<TraceEntry>,
     },
 }

@@ -4,14 +4,48 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::sync::Mutex;
 
-// Define the protocol structs locally or share via a common crate if possible.
-// For simplicity in a plugin (which is a dylib), we'll define a mirroring struct
-// or just use serde_json Value if we want to avoid linking complex crates,
-// but linking `koradar-core` might be tricky due to `cdylib` nature.
-// Let's define a simple local struct for serialization.
+// Wrapper for pointers to make them Send+Sync
+struct SyncPtr<T>(*mut T);
+unsafe impl<T> Send for SyncPtr<T> {}
+unsafe impl<T> Sync for SyncPtr<T> {}
+
+impl<T> Clone for SyncPtr<T> {
+    fn clone(&self) -> Self {
+        SyncPtr(self.0)
+    }
+}
+
+impl<T> Copy for SyncPtr<T> {}
+
+// GLib FFI
+#[repr(C)]
+struct LocalGArray {
+    data: *mut c_char,
+    len: c_uint,
+}
+
+#[repr(C)]
+struct LocalGByteArray {
+    data: *mut u8,
+    len: c_uint,
+}
+
+#[cfg(target_os = "linux")]
+#[link(name = "glib-2.0")]
+extern "C" {
+    fn g_byte_array_new() -> *mut LocalGByteArray;
+    fn g_byte_array_free(array: *mut LocalGByteArray, free_segment: c_int) -> *mut u8;
+}
+
+#[repr(C)]
+struct qemu_plugin_reg_descriptor_local {
+    handle: *mut c_void,
+    name: *const c_char,
+    feature: *const c_char,
+}
 
 #[derive(Serialize)]
 enum TraceEvent {
@@ -23,6 +57,13 @@ enum TraceEvent {
         pc: u64,
         bytes: Vec<u8>,
         disasm: Option<String>,
+        regs: Vec<u64>, // Add registers
+    },
+    MemAccess {
+        vcpu_index: u32,
+        vaddr: u64,
+        is_store: bool,
+        value: u64, // Not used yet, placeholder
     },
     Exit {
         vcpu_index: u32,
@@ -44,6 +85,9 @@ lazy_static! {
     static ref INSN_CACHE: Mutex<HashMap<u64, Vec<u8>>> = Mutex::new(HashMap::new());
     // Cache for disassembly: PC -> String
     static ref DISASM_CACHE: Mutex<HashMap<u64, String>> = Mutex::new(HashMap::new());
+    
+    // Register Cache
+    static ref REGS: Mutex<Vec<SyncPtr<c_void>>> = Mutex::new(Vec::new());
 }
 
 // --- Helper to send events ---
@@ -78,6 +122,53 @@ fn send_event(event: TraceEvent) {
 
 extern "C" fn vcpu_init(_id: qemu_plugin_id_t, vcpu_index: u32) {
     println!("Koradar Tracer: vCPU {} initialized", vcpu_index);
+    
+    // Initialize registers if not done
+    let mut regs = REGS.lock().unwrap();
+    if regs.is_empty() {
+        unsafe {
+            let reg_array_ptr = qemu_plugin_get_registers();
+            if !reg_array_ptr.is_null() {
+                // reg_array_ptr is *mut GArray (opaque in sys)
+                let reg_array = &*(reg_array_ptr as *mut LocalGArray);
+                let count = reg_array.len as usize;
+                let data_ptr = reg_array.data as *mut qemu_plugin_reg_descriptor_local;
+                
+                println!("Koradar Tracer: Found {} registers", count);
+                
+                // Map of name -> handle
+                let mut reg_map = HashMap::new();
+
+                println!("Koradar Tracer: Scanning registers...");
+                for i in 0..count {
+                    let desc = &*data_ptr.add(i);
+                    let name_c = std::ffi::CStr::from_ptr(desc.name);
+                    let name = name_c.to_string_lossy().into_owned();
+                    println!("Koradar Tracer: Reg[{}] = {}", i, name); // DEBUG PRINT
+                    reg_map.insert(name.to_lowercase(), desc.handle);
+                }
+
+                // Target order: RAX, RBX, RCX, RDX, RSI, RDI, RBP, RSP, R8-R15
+                let target_regs = [
+                    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+                    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"
+                ];
+
+                for &target in target_regs.iter() {
+                    if let Some(&handle) = reg_map.get(target) {
+                        regs.push(SyncPtr(handle));
+                    } else {
+                        println!("Koradar Tracer: Warning - Register {} not found", target);
+                        // Push null pointer as placeholder? 
+                        // Or handle it in read loop.
+                        // Let's push null and check for it.
+                        regs.push(SyncPtr(std::ptr::null_mut()));
+                    }
+                }
+            }
+        }
+    }
+    
     send_event(TraceEvent::Init { vcpu_index });
 }
 
@@ -94,14 +185,52 @@ extern "C" fn plugin_exit(_id: qemu_plugin_id_t, _data: *mut c_void) {
 extern "C" fn vcpu_insn_exec(vcpu_index: u32, userdata: *mut c_void) {
     let mut state = STATE.lock().unwrap();
     state.insn_count += 1;
-    // For performance, we shouldn't lock and send JSON every instruction in a real scenario.
-    // We should buffer. But for Phase 1.5 proof-of-concept, we'll do it.
-
-    // userdata is the PC (passed as pointer)
     let pc = userdata as u64;
-
-    // Drop lock before sending to avoid contention if send blocks (though unix stream buffer helps)
     drop(state);
+
+    // Capture registers (x86_64)
+    let mut reg_values = Vec::new();
+    let regs_handles = REGS.lock().unwrap();
+    
+    #[cfg(target_os = "linux")]
+    unsafe {
+        for &handle in regs_handles.iter() {
+             if handle.0.is_null() {
+                 reg_values.push(0);
+                 continue;
+             }
+             
+             let buf = g_byte_array_new();
+             
+             // Cast our LocalGByteArray* to sys::GByteArray* (opaque/compatible)
+             // Cast handle.0 (*mut c_void) to *mut qemu_plugin_register
+             qemu_plugin_read_register(handle.0 as *mut _, buf as *mut _);
+             
+             let arr = &*buf;
+             let len = arr.len; 
+             let data = arr.data;
+
+             if len >= 8 {
+                 let val_ptr = data as *const u64;
+                 reg_values.push(*val_ptr);
+             } else if len == 4 {
+                 let val_ptr = data as *const u32;
+                 reg_values.push(*val_ptr as u64);
+             } else {
+                 reg_values.push(0);
+             }
+             
+             g_byte_array_free(buf, 1);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Dummy values for non-Linux builds
+        reg_values.resize(16, 0);
+    }
+    
+    let regs = reg_values;
 
     // Retrieve bytes from cache
     let (bytes, disasm) = if let Ok(cache) = INSN_CACHE.lock() {
@@ -121,6 +250,18 @@ extern "C" fn vcpu_insn_exec(vcpu_index: u32, userdata: *mut c_void) {
         pc,
         bytes,
         disasm,
+        regs,
+    });
+}
+
+extern "C" fn vcpu_mem_access(vcpu_index: u32, info: qemu_plugin_meminfo_t, vaddr: u64, _userdata: *mut c_void) {
+    let is_store = unsafe { qemu_plugin_mem_is_store(info) };
+    
+    send_event(TraceEvent::MemAccess {
+        vcpu_index,
+        vaddr,
+        is_store,
+        value: 0, // Value capture requires more callbacks or register inspection
     });
 }
 
@@ -133,10 +274,8 @@ extern "C" fn vcpu_tb_trans(_id: qemu_plugin_id_t, tb: *mut qemu_plugin_tb) {
 
             // Extract bytes
             let size = qemu_plugin_insn_size(insn);
-            // Initialize with a pattern to detect if write failed
             let mut bytes = vec![0xAAu8; size];
             
-            // Try haddr first (more reliable for reading bytes)
             let haddr = qemu_plugin_insn_haddr(insn);
             let captured;
 
@@ -144,13 +283,7 @@ extern "C" fn vcpu_tb_trans(_id: qemu_plugin_id_t, tb: *mut qemu_plugin_tb) {
                 std::ptr::copy_nonoverlapping(haddr as *const u8, bytes.as_mut_ptr(), size);
                 captured = true;
             } else {
-                // Fallback
-                // We assume qemu_plugin_insn_data writes to the buffer.
-                // If it doesn't, bytes will remain 0xAA.
-                // Note: qemu_plugin_insn_data return value is actually usize (bytes copied) in some versions,
-                // but header signature might vary. We'll rely on pattern check.
                 qemu_plugin_insn_data(insn, bytes.as_mut_ptr() as *mut c_void, size);
-                // Check if unchanged
                 if bytes.iter().all(|&b| b == 0xAA) {
                     captured = false;
                 } else {
@@ -159,16 +292,13 @@ extern "C" fn vcpu_tb_trans(_id: qemu_plugin_id_t, tb: *mut qemu_plugin_tb) {
             }
 
             if !captured {
-                // If capture failed, send empty bytes so server falls back to QEMU disasm
                 bytes.clear();
             }
             
-            // Store in cache
             if let Ok(mut cache) = INSN_CACHE.lock() {
                 cache.insert(vaddr, bytes);
             }
             
-            // Get disassembly
             let disas_ptr = qemu_plugin_insn_disas(insn);
             if !disas_ptr.is_null() {
                 let s = std::ffi::CStr::from_ptr(disas_ptr).to_string_lossy().into_owned();
@@ -177,18 +307,23 @@ extern "C" fn vcpu_tb_trans(_id: qemu_plugin_id_t, tb: *mut qemu_plugin_tb) {
                  }
             }
 
-            // Pass PC as userdata
             qemu_plugin_register_vcpu_insn_exec_cb(
                 insn,
                 Some(vcpu_insn_exec),
-                qemu_plugin_cb_flags::QEMU_PLUGIN_CB_NO_REGS,
+                qemu_plugin_cb_flags::QEMU_PLUGIN_CB_R_REGS,
                 vaddr as *mut c_void,
+            );
+            
+            qemu_plugin_register_vcpu_mem_cb(
+                insn,
+                Some(vcpu_mem_access),
+                qemu_plugin_cb_flags::QEMU_PLUGIN_CB_R_REGS,
+                qemu_plugin_mem_rw::QEMU_PLUGIN_MEM_RW,
+                std::ptr::null_mut(),
             );
         }
     }
 }
-
-// --- Entry Point ---
 
 #[no_mangle]
 #[used]

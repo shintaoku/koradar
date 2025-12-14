@@ -148,6 +148,13 @@ impl TraceDB {
         None
     }
 
+    pub fn get_memory_writes(&self, address: Address) -> Vec<Clnum> {
+        self.memory
+            .get(&address)
+            .map(|cell| cell.history.iter().map(|(c, _)| *c).collect())
+            .unwrap_or_default()
+    }
+
     pub fn load_static_memory(&self, start_addr: Address, data: &[u8]) {
         for (i, &byte) in data.iter().enumerate() {
             let addr = start_addr + i as u64;
@@ -271,6 +278,29 @@ impl TraceDB {
             .collect()
     }
 
+    pub fn update_registers(&self, clnum: Clnum, new_regs: &[u64]) {
+        let mut regs = self.registers.write();
+        // Ensure enough space
+        while regs.len() < new_regs.len() {
+            regs.push(Vec::new());
+        }
+
+        for (i, &val) in new_regs.iter().enumerate() {
+            // Optimization: Only record if value changed from last recorded state
+            // Note: This assumes strict sequential insertion by clnum
+            let changed = if let Some(&(_, last_val)) = regs[i].last() {
+                last_val != val
+            } else {
+                // Always record the first value seen for a register
+                true
+            };
+
+            if changed {
+                regs[i].push((clnum, val));
+            }
+        }
+    }
+
     pub fn disassemble(&self, address: Address, bytes: &[u8]) -> String {
         if bytes.is_empty() {
             return String::from("...");
@@ -281,13 +311,36 @@ impl TraceDB {
             return s.clone();
         }
 
-        let disasm = self
+        let mut disasm = self
             .disassembler
             .lock()
             .disassemble(bytes, address)
             .unwrap_or_else(|_| "invalid".to_string());
+        
+        // Semantic Lifting: Stack Variables
+        disasm = self.resolve_stack_vars(&disasm);
+
         self.insn_cache.insert(key, disasm.clone());
         disasm
+    }
+
+    fn resolve_stack_vars(&self, disasm: &str) -> String {
+        use regex::Regex;
+        use lazy_static::lazy_static;
+
+        lazy_static! {
+            static ref RE_RBP_MINUS: Regex = Regex::new(r"\[rbp\s*-\s*0x([0-9a-fA-F]+)\]").unwrap();
+            static ref RE_RBP_PLUS: Regex = Regex::new(r"\[rbp\s*\+\s*0x([0-9a-fA-F]+)\]").unwrap();
+        }
+
+        let s = RE_RBP_MINUS.replace_all(disasm, |caps: &regex::Captures| {
+            format!("var_{}", &caps[1])
+        });
+        let s = RE_RBP_PLUS.replace_all(&s, |caps: &regex::Captures| {
+            format!("arg_{}", &caps[1])
+        });
+        
+        s.to_string()
     }
 
     pub fn get_disassembly_at(&self, clnum: Clnum) -> String {
@@ -429,5 +482,150 @@ impl TraceDB {
             }
         }
         entries
+    }
+
+    pub fn get_slice(&self, start_clnum: Clnum, target: String) -> Vec<Clnum> {
+        let mut tainted_regs = std::collections::HashSet::new();
+        let mut tainted_mem = std::collections::HashSet::new();
+
+        if target.starts_with("0x") {
+             if let Ok(addr) = u64::from_str_radix(&target[2..], 16) {
+                 tainted_mem.insert(addr);
+             }
+        } else {
+            let reg_map: std::collections::HashMap<&str, usize> = [
+                ("rax", 0), ("rbx", 1), ("rcx", 2), ("rdx", 3),
+                ("rsi", 4), ("rdi", 5), ("rbp", 6), ("rsp", 7),
+                ("r8", 8), ("r9", 9), ("r10", 10), ("r11", 11),
+                ("r12", 12), ("r13", 13), ("r14", 14), ("r15", 15)
+            ].iter().cloned().collect();
+            if let Some(&idx) = reg_map.get(target.to_lowercase().as_str()) {
+                tainted_regs.insert(idx);
+            }
+        }
+
+        let changes = self.changes.read();
+        let mut slice = Vec::new();
+        
+        // Manual grouping logic
+        let mut processed_clnum = u32::MAX; // Sentinel
+        let mut current_changes: Vec<Change> = Vec::new();
+        
+        // Helper to process a group
+        // Note: Closure cannot capture self if we are iterating changes (borrowing self.changes).
+        // So we split iteration and processing? Or use RwLockReadGuard safely.
+        // changes is ReadGuard. self.disassembler is Mutex. self.instructions is DashMap.
+        // It's safe to access other fields while holding read lock on changes.
+        // But the closure definition inside the function is tricky with borrow checker.
+        // Let's inline the logic or use a macro.
+        // Inlining for now.
+        
+        for change in changes.iter().rev() {
+            if change.clnum > start_clnum { continue; }
+            
+            if change.clnum != processed_clnum {
+                if !current_changes.is_empty() && processed_clnum != u32::MAX {
+                    // PROCESS GROUP logic
+                    let clnum = processed_clnum;
+                    let group = &current_changes;
+                    
+                     let mut relevant = false;
+                     let mut written_regs = Vec::new();
+                     let mut written_mem = Vec::new();
+                     
+                     for ch in group {
+                         let flags = ChangeFlags::from_bits_truncate(ch.flags);
+                         if flags.contains(ChangeFlags::IS_WRITE) {
+                             if flags.contains(ChangeFlags::IS_MEM) {
+                                 if tainted_mem.contains(&ch.address) {
+                                     relevant = true;
+                                     written_mem.push(ch.address);
+                                 }
+                             } else {
+                                 let reg_idx = (ch.address / 8) as usize;
+                                 if tainted_regs.contains(&reg_idx) {
+                                     relevant = true;
+                                     written_regs.push(reg_idx);
+                                 }
+                             }
+                         }
+                     }
+                     
+                     if relevant {
+                         slice.push(clnum);
+                         for r in written_regs { tainted_regs.remove(&r); }
+                         for m in written_mem { tainted_mem.remove(&m); }
+                         
+                         // Inputs
+                         for ch in group {
+                             let flags = ChangeFlags::from_bits_truncate(ch.flags);
+                             if flags.contains(ChangeFlags::IS_MEM) && !flags.contains(ChangeFlags::IS_WRITE) {
+                                 tainted_mem.insert(ch.address);
+                             }
+                         }
+                         
+                         // Register Inputs via Capstone
+                         let pc = group.iter()
+                            .find(|ch| ChangeFlags::from_bits_truncate(ch.flags).contains(ChangeFlags::IS_START))
+                            .map(|ch| ch.address)
+                            .unwrap_or(0);
+                         
+                         if pc != 0 {
+                             let bytes = if let Some(b) = self.instructions.get(&clnum) {
+                                b.clone()
+                             } else {
+                                let bias = *self.bias.read();
+                                let static_addr = (pc as i128 - bias as i128) as u64;
+                                self.get_memory_at(clnum, static_addr, 16)
+                             };
+
+                             if !bytes.is_empty() {
+                                if let Ok(reads) = self.disassembler.lock().get_read_registers(&bytes, pc) {
+                                    for r in reads {
+                                        tainted_regs.insert(r);
+                                    }
+                                }
+                             }
+                         }
+                     }
+
+                    current_changes.clear();
+                    if tainted_regs.is_empty() && tainted_mem.is_empty() {
+                        break;
+                    }
+                }
+                processed_clnum = change.clnum;
+            }
+            current_changes.push(*change);
+        }
+        // Last group (actually first instruction executed)
+        if !current_changes.is_empty() && processed_clnum != u32::MAX {
+             // Copy-paste logic or extract function?
+             // Extracting requires passing self, tainted sets, etc.
+             // Just duplicating for safety now to avoid lifetime hell with closure capturing &mut sets and &self.
+             
+             let clnum = processed_clnum;
+             let group = &current_changes;
+             let mut relevant = false;
+             let mut written_regs = Vec::new();
+             let mut written_mem = Vec::new();
+             for ch in group {
+                 let flags = ChangeFlags::from_bits_truncate(ch.flags);
+                 if flags.contains(ChangeFlags::IS_WRITE) {
+                     if flags.contains(ChangeFlags::IS_MEM) {
+                         if tainted_mem.contains(&ch.address) { relevant = true; written_mem.push(ch.address); }
+                     } else {
+                         let reg_idx = (ch.address / 8) as usize;
+                         if tainted_regs.contains(&reg_idx) { relevant = true; written_regs.push(reg_idx); }
+                     }
+                 }
+             }
+             if relevant {
+                 slice.push(clnum);
+             }
+        }
+        
+        slice.reverse();
+        slice
     }
 }

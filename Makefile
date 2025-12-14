@@ -40,7 +40,7 @@ build-tracer-linux:
 			-v "$$(pwd):/workspace" \
 			-w /workspace \
 			rust:latest \
-			bash -c "rustup target add x86_64-unknown-linux-gnu && cargo build --release -p koradar-tracer --target x86_64-unknown-linux-gnu"; \
+			bash -c "apt-get update && apt-get install -y libglib2.0-dev && rustup target add x86_64-unknown-linux-gnu && cargo build --release -p koradar-tracer --target x86_64-unknown-linux-gnu"; \
 	else \
 		echo "Docker not found, skipping Linux tracer build."; \
 	fi
@@ -94,6 +94,31 @@ test-binary:
 	@echo ""
 	@echo "Test binary created at /tmp/koradar_test_hello"
 	@echo "Run: make trace BINARY=/tmp/koradar_test_hello"
+
+# Build and run the vulnerable stack example
+example-vuln:
+	@echo "Building vulnerable example..."
+	@mkdir -p examples/vuln_stack/build
+	@# Compile with -fno-stack-protector and -no-pie to make it easy to exploit
+	@if command -v gcc >/dev/null 2>&1 && [ "$(UNAME_S)" = "Linux" ]; then \
+		gcc -fno-stack-protector -no-pie examples/vuln_stack/vuln.c -o examples/vuln_stack/build/vuln; \
+	elif command -v docker >/dev/null 2>&1; then \
+		docker run --rm --platform linux/amd64 -v "$$(pwd)/examples/vuln_stack:/src" -w /src \
+			gcc:latest gcc -static -fno-stack-protector -no-pie vuln.c -o build/vuln; \
+	else \
+		echo "Error: Cannot build. Need gcc (on Linux) or docker."; \
+		exit 1; \
+	fi
+	@echo "Binary built at examples/vuln_stack/build/vuln"
+	@echo "Generating payload..."
+	@python3 examples/vuln_stack/exploit.py > examples/vuln_stack/build/payload
+	@echo "Running trace..."
+	@# Use trace_docker.sh for consistency on macOS
+	@if [ "$(UNAME_S)" = "Darwin" ]; then \
+		./scripts/trace_docker.sh examples/vuln_stack/build/vuln < examples/vuln_stack/build/payload; \
+	else \
+		./qemu-build/bin/qemu-x86_64 -plugin ./target/release/libkoradar_tracer.so examples/vuln_stack/build/vuln < examples/vuln_stack/build/payload; \
+	fi
 
 # Clean artifacts
 clean:
